@@ -2,7 +2,66 @@
 
 Local-first knowledge base. **Markdown on disk is the only source of truth.**
 
-## Run (Docker only)
+## Production — pre-built image
+
+The fastest way to run KBOS. No build step required.
+
+**1. Create your data directories and env file**
+
+```bash
+mkdir -p vault vaults
+cp .env.example .env
+# Edit .env: set DOCKER_UID/DOCKER_GID to match your host user (id -u / id -g)
+```
+
+**2. Pull and start**
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+**3. Create the first admin user**
+
+```bash
+docker compose -f docker-compose.prod.yml exec web \
+  kb -V /vault user add admin --admin -p 'changeme'
+```
+
+**4. Open the UI**
+
+Navigate to `http://localhost:${KBOS_PORT}` (default `http://localhost:3000`).
+
+**Upgrading**
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+**Stopping**
+
+```bash
+docker compose -f docker-compose.prod.yml down
+```
+
+### .env settings
+
+Copy `.env.example` to `.env` and adjust:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCKER_UID` | `1000` | UID that owns vault files — should match your host user (`id -u`) |
+| `DOCKER_GID` | `1000` | GID that owns vault files — should match your host group (`id -g`) |
+| `VAULT_PATH` | `./vault` | Path to your primary vault directory on the host |
+| `VAULTS_BASE` | `./vaults` | Path to the multi-vault base directory on the host |
+| `KBOS_PORT` | `3000` | Host port the web UI is exposed on |
+
+> **Reverse proxy**: If you front KBOS with nginx/Caddy, you can remove the `ports:` block from `docker-compose.prod.yml` and use the `proxy` external network instead.
+
+---
+
+## Local build (from source)
 
 No Go, Node, or other tools on the host — only Docker and `manage.sh`.
 
