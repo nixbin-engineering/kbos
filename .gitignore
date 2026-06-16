@@ -26,3 +26,10 @@ out/
 .env
 .env.*
 !.env.example
+
+# Internal dev tooling
+product.md
+ROADMAP.md
+AGENTS.md
+CLAUDE.md
+.cursor/
