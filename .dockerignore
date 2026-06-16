@@ -1,0 +1,8 @@
+vault/
+.git
+.cursor
+web/node_modules
+web/.next
+bin/
+*.md
+!product.md

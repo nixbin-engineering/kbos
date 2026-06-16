@@ -1,0 +1,28 @@
+# KBOS generated / local (vault/ is bind-mounted; ignore user notes, keep dir)
+.kb/
+vault/*
+!vault/.gitkeep
+!vault/README.md
+
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+
+# Node (web/, later)
+node_modules/
+.next/
+out/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.*
+!.env.example

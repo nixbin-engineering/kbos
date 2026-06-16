@@ -1,0 +1,51 @@
+# KBOS — use ./manage.sh (setup, up, down, init, fix-perms, …)
+# VAULT_PATH  → main vault (mounted at /vault)
+# VAULTS_BASE → directory housing all vaults (mounted at /vaults)
+
+services:
+  init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    volumes:
+      - ${VAULT_PATH:-./vault}:/vault
+      - ${VAULTS_BASE:-./vaults}:/vaults
+      - ./scripts/init-vault.sh:/scripts/init-vault.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/init-vault.sh"]
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    container_name: kbos
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    #ports:
+    #  - "${KBOS_PORT:-3000}:3000"
+    networks:
+      - proxy
+    environment:
+      VAULT_PATH: /vault
+      VAULTS_BASE: /vaults
+    volumes:
+      - ${VAULT_PATH:-./vault}:/vault
+      - ${VAULTS_BASE:-./vaults}:/vaults
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+networks:
+  proxy:
+    name: proxy
+    external: true
