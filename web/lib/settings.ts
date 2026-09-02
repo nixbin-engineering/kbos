@@ -17,6 +17,8 @@ export type AISettings = {
   model: string;
   // Optional: embedding model for semantic/vector search (leave blank to use keyword search only)
   embed_model?: string;
+  // Optional: separate base URL for embedding calls (leave blank to reuse base_url)
+  embed_base_url?: string;
 };
 
 export type SecuritySettings = {
@@ -90,6 +92,8 @@ export async function loadSettings(): Promise<VaultSettings> {
         typeof ai.model === "string" && ai.model.trim() ? ai.model.trim() : defaults.ai.model,
       embed_model:
         typeof ai.embed_model === "string" && ai.embed_model.trim() ? ai.embed_model.trim() : undefined,
+      embed_base_url:
+        typeof ai.embed_base_url === "string" && ai.embed_base_url.trim() ? ai.embed_base_url.trim() : undefined,
     },
   };
 }
@@ -122,6 +126,7 @@ export async function saveAISettings(ai: AISettings): Promise<void> {
       base_url: ai.base_url.trim() || defaults.ai.base_url,
       model: ai.model.trim() || defaults.ai.model,
       ...(ai.embed_model?.trim() ? { embed_model: ai.embed_model.trim() } : {}),
+      ...(ai.embed_base_url?.trim() ? { embed_base_url: ai.embed_base_url.trim() } : {}),
     };
   });
 }

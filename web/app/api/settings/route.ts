@@ -53,6 +53,7 @@ export async function PUT(req: NextRequest) {
       base_url: String(ai.base_url || "").trim(),
       model: String(ai.model || "").trim(),
       embed_model: String(ai.embed_model || "").trim() || undefined,
+      embed_base_url: String(ai.embed_base_url || "").trim() || undefined,
     });
   }
 

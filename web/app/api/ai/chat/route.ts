@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { streamChatCompletion, type ChatMessage } from "@/lib/ai/provider";
 import {
   buildContextBlock,
+  buildVaultMap,
   extractCitationPaths,
   retrieveContext,
   type ChatScope,
@@ -19,12 +20,13 @@ type ChatRequest = {
   history?: { role: "user" | "assistant"; content: string }[];
 };
 
-const SYSTEM = `You are KBOS, a knowledge base assistant. Answer using ONLY the provided note excerpts.
+const SYSTEM = `You are KBOS, a knowledge base assistant. Answer using ONLY the provided vault map and note excerpts — never invent notes, paths, or facts not shown below.
 Rules:
+- The "Vault map" lists every note's title, path, and tags — use it to answer questions about overall structure, topics covered, or which notes exist.
+- The "Knowledge base excerpts" contain actual note content — use these for specific facts and details.
 - Be concise and practical.
 - When stating facts from notes, cite the source as a markdown link: [Note Title](relative/path.md)
-- If the excerpts do not contain enough information, say what is missing and suggest which folders or tags to explore.
-- Do not invent note contents or paths.`;
+- If neither the map nor the excerpts contain enough information, say what is missing and suggest which folders or tags to explore.`;
 
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
@@ -49,12 +51,19 @@ export async function POST(req: NextRequest) {
   const scopePath = body.scopePath ?? null;
   const history = (body.history || []).slice(-8);
 
-  const chunks = await retrieveContext(message, scope, scopePath, settings.ai);
+  const folderForMap = scope === "folder" ? (scopePath ?? "") : "";
+  const [chunks, vaultMap] = await Promise.all([
+    retrieveContext(message, scope, scopePath, settings.ai),
+    scope === "document" ? Promise.resolve(null) : buildVaultMap(folderForMap),
+  ]);
   const context = buildContextBlock(chunks);
   const citationPaths = chunks.map((c) => c.path);
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM },
+    ...(vaultMap !== null
+      ? [{ role: "system" as const, content: `Vault map (all notes — title, path, tags):\n\n${vaultMap}` }]
+      : []),
     {
       role: "system",
       content: `Knowledge base excerpts (scope: ${scope}${scopePath ? ` → ${scopePath}` : ""}):\n\n${context}`,

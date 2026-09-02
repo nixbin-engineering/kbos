@@ -96,10 +96,11 @@ function ModelPicker({
             <button
               key={m}
               type="button"
+              title={m}
               onClick={() => { onChange(m); setShowList(false); }}
-              className={`flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-[var(--border)] ${value === m ? "font-semibold text-[var(--accent)]" : ""}`}
+              className={`flex w-full items-center truncate px-3 py-1.5 text-left text-xs hover:bg-[var(--border)] ${value === m ? "font-semibold text-[var(--accent)]" : ""}`}
             >
-              {m}
+              {m.split("/").pop() || m}
             </button>
           ))}
         </div>
@@ -120,10 +121,13 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
     base_url: "",
     model: "",
     embed_model: "",
+    embed_base_url: "",
   });
   const [aiStatus, setAiStatus] = useState<string | null>(null);
+  const [embedStatus, setEmbedStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [probing, setProbing] = useState(false);
+  const [probingEmbed, setProbingEmbed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [indexStats, setIndexStats] = useState<{ docCount: number; chunkCount: number; sizeBytes: number } | null>(null);
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
@@ -190,7 +194,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
     const r = await fetch("/api/settings");
     if (r.ok) {
       const data = (await r.json()) as SettingsDoc;
-      setAi({ embed_model: "", ...data.ai });
+      setAi({ embed_model: "", embed_base_url: "", ...data.ai });
       setAttachmentsSubdir(data.ui.attachments_subdir || "attachments");
       if (data.ui.start_page) setStartPage(data.ui.start_page);
       if (data.security) {
@@ -202,6 +206,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
     if (status.ok) {
       const s = await status.json();
       setAiStatus(s.connected ? `Connected · ${s.model}` : s.status_message);
+      setEmbedStatus(s.embed_status_message);
     }
     const totpPolicy = await fetch("/api/admin/totp");
     if (totpPolicy.ok) {
@@ -259,6 +264,25 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
       setAiStatus(String(e));
     } finally {
       setProbing(false);
+    }
+  };
+
+  const testEmbedConnection = async () => {
+    setProbingEmbed(true);
+    setEmbedStatus(null);
+    try {
+      await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ai }),
+      });
+      const r = await fetch("/api/ai/status");
+      const s = await r.json();
+      setEmbedStatus(s.embed_status_message);
+    } catch (e) {
+      setEmbedStatus(String(e));
+    } finally {
+      setProbingEmbed(false);
     }
   };
 
@@ -555,25 +579,42 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
                         </select>
                       </label>
                       <label className="mb-4 block text-sm">
-                        Base URL
+                        Base URL (chat model)
                         <input value={ai.base_url} onChange={(e) => setAi({ ...ai, base_url: e.target.value })}
                           placeholder="http://host.docker.internal:11434/v1"
                           className="mt-1.5 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-xs" />
                       </label>
                       <ModelPicker label="Chat model" value={ai.model} onChange={(v) => setAi({ ...ai, model: v })}
                         placeholder="llama3.2" baseUrl={ai.base_url} hint='Click "Fetch" to list models from your provider.' />
+                      <label className="mb-4 block text-sm">
+                        Embedding Base URL
+                        <input value={ai.embed_base_url ?? ""} onChange={(e) => setAi({ ...ai, embed_base_url: e.target.value })}
+                          placeholder="Leave blank to reuse the Base URL above"
+                          className="mt-1.5 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-xs" />
+                        <span className="mt-1 block text-xs text-[var(--muted)]">
+                          Use this if your embedding model is served from a different endpoint than the chat model.
+                        </span>
+                      </label>
                       <ModelPicker label="Embedding model (semantic RAG)" value={ai.embed_model ?? ""}
-                        onChange={(v) => setAi({ ...ai, embed_model: v })} placeholder="nomic-embed-text" baseUrl={ai.base_url}
+                        onChange={(v) => setAi({ ...ai, embed_model: v })} placeholder="nomic-embed-text"
+                        baseUrl={ai.embed_base_url?.trim() || ai.base_url}
                         hint="Leave blank for keyword-only search." />
                       <p className="mb-3 text-xs text-[var(--muted)]">
                         Set <code className="rounded bg-[var(--border)] px-1">AI_API_KEY</code> in <code className="rounded bg-[var(--border)] px-1">.env</code> for cloud providers.
                       </p>
-                      <div className="flex items-center gap-3">
+                      <div className="mb-2 flex items-center gap-3">
                         <button type="button" disabled={probing || !ai.enabled} onClick={testConnection}
                           className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--border)] disabled:opacity-50">
-                          {probing ? <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Testing…</span> : "Test connection"}
+                          {probing ? <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Testing…</span> : "Test chat connection"}
                         </button>
                         {aiStatus && <span className="text-xs text-[var(--muted)]">{aiStatus}</span>}
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button type="button" disabled={probingEmbed || !ai.enabled || !ai.embed_model?.trim()} onClick={testEmbedConnection}
+                          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--border)] disabled:opacity-50">
+                          {probingEmbed ? <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Testing…</span> : "Test embedding connection"}
+                        </button>
+                        {embedStatus && <span className="text-xs text-[var(--muted)]">{embedStatus}</span>}
                       </div>
                     </div>
 

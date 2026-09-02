@@ -33,6 +33,14 @@ self.addEventListener("fetch", (e) => {
         }
         return res;
       })
-      .catch(() => caches.match(request).then((r) => r ?? caches.match("/")))
+      .catch(() =>
+        caches.match(request).then((r) => {
+          if (r) return r;
+          // Only the app shell falls back to "/" — swapping a missing JS/CSS
+          // chunk for the index HTML would break it silently.
+          if (request.mode === "navigate") return caches.match("/");
+          return Response.error();
+        })
+      )
   );
 });

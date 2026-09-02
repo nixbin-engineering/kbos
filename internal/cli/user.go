@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/nt-kb/kbos/internal/auth"
@@ -16,7 +17,8 @@ func userCmd() *cobra.Command {
 		Use:   "user",
 		Short: "Manage local users",
 	}
-	cmd.AddCommand(userAddCmd(), userListCmd(), userRemoveCmd(), userPasswdCmd())
+	cmd.AddCommand(userAddCmd(), userListCmd(), userRemoveCmd(), userPasswdCmd(),
+		userShowCmd(), userSearchCmd(), userPromoteCmd(), userDemoteCmd())
 	return cmd
 }
 
@@ -128,6 +130,103 @@ func userRemoveCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func userShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show USERNAME",
+		Short: "Show details for one local user",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := resolveVault()
+			if err != nil {
+				return exitErr(err)
+			}
+			store, err := auth.Load(root)
+			if err != nil {
+				return exitErr(err)
+			}
+			u, ok := store.Users[args[0]]
+			if !ok {
+				return exitErr(fmt.Errorf("user not found: %s", args[0]))
+			}
+			fmt.Printf("username: %s\n", args[0])
+			fmt.Printf("role:     %s\n", u.Role)
+			fmt.Printf("created:  %s\n", u.CreatedAt)
+			return nil
+		},
+	}
+}
+
+func userSearchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "search QUERY",
+		Short: "Search local users by username substring",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := resolveVault()
+			if err != nil {
+				return exitErr(err)
+			}
+			store, err := auth.Load(root)
+			if err != nil {
+				return exitErr(err)
+			}
+			query := strings.ToLower(args[0])
+			found := 0
+			for name, u := range store.Users {
+				if strings.Contains(strings.ToLower(name), query) {
+					fmt.Printf("  %s  role=%s  created=%s\n", name, u.Role, u.CreatedAt)
+					found++
+				}
+			}
+			if found == 0 {
+				fmt.Println("No matching users")
+			}
+			return nil
+		},
+	}
+}
+
+func userPromoteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "promote USERNAME",
+		Short: "Grant a local user the admin role",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setUserRole(args[0], "admin")
+		},
+	}
+}
+
+func userDemoteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "demote USERNAME",
+		Short: "Remove the admin role from a local user",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setUserRole(args[0], "user")
+		},
+	}
+}
+
+func setUserRole(username, role string) error {
+	root, err := resolveVault()
+	if err != nil {
+		return exitErr(err)
+	}
+	store, err := auth.Load(root)
+	if err != nil {
+		return exitErr(err)
+	}
+	if err := store.SetRole(username, role); err != nil {
+		return exitErr(err)
+	}
+	if err := auth.Save(root, store); err != nil {
+		return exitErr(err)
+	}
+	fmt.Printf("User %q role set to %q\n", username, role)
+	return nil
 }
 
 func userPasswdCmd() *cobra.Command {

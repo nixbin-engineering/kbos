@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Bookmark, BookOpen, Bot, CheckSquare, FilePlus, GitBranch, KeyRound, Link2, Menu, RefreshCw, Settings, Wrench } from "lucide-react";
 import type { Tab, TreeNode } from "@/lib/types";
 import { useVaultEvents } from "@/lib/use-vault-events";
+import { createLocalFile, forgetLocalFileHandle, newLocalFileId, openLocalFile, registerLocalFileHandle } from "@/lib/local-file";
 import { AdminSettingsButton } from "./admin-settings";
 import { TabBar } from "./tab-bar";
 import { Tooltip } from "./tooltip";
@@ -11,6 +12,7 @@ import { AiChatPanel, type ChatScope } from "./ai-chat-panel";
 import { BookmarksManager } from "./bookmarks-manager";
 import { CommandPalette } from "./command-palette";
 import { DocWorkspace } from "./doc-workspace";
+import { LocalFileWorkspace } from "./local-file-workspace";
 import { FolderIndexView } from "./folder-index-view";
 import { GraphPanel } from "./graph-panel";
 import { JournalMenu } from "./journal-menu";
@@ -288,6 +290,8 @@ export function KbosShell() {
 
   const closeTab = useCallback((idx: number) => {
     setTabs((prev) => {
+      const closedId = prev[idx]?.localFileId;
+      if (closedId) void forgetLocalFileHandle(closedId);
       if (prev.length === 1) return [{ id: `tab-${tabIdCounter.current++}`, path: null, folderView: null }];
       return prev.filter((_, i) => i !== idx);
     });
@@ -303,6 +307,30 @@ export function KbosShell() {
     setTabs((prev) => [...prev, { id, path: null, folderView: null }]);
     setActiveTabIdx((prev) => tabs.length); // new tab is at end
   }, [tabs.length]);
+
+  const openLocalFileTab = useCallback(async () => {
+    const handle = await openLocalFile();
+    if (!handle) return;
+    const fileId = newLocalFileId();
+    await registerLocalFileHandle(fileId, handle);
+    const id = `tab-${tabIdCounter.current++}`;
+    setTabs((prev) => [...prev, { id, path: null, folderView: null, localFileId: fileId, localFileName: handle.name }]);
+    setActiveTabIdx((prev) => prev + 1);
+    setAppView("notes");
+    setSidebarOpen(false);
+  }, []);
+
+  const newLocalFileTab = useCallback(async () => {
+    const handle = await createLocalFile();
+    if (!handle) return;
+    const fileId = newLocalFileId();
+    await registerLocalFileHandle(fileId, handle);
+    const id = `tab-${tabIdCounter.current++}`;
+    setTabs((prev) => [...prev, { id, path: null, folderView: null, localFileId: fileId, localFileName: handle.name }]);
+    setActiveTabIdx((prev) => prev + 1);
+    setAppView("notes");
+    setSidebarOpen(false);
+  }, []);
 
   const activateTab = useCallback((idx: number) => {
     setActiveTabIdx(idx);
@@ -379,11 +407,14 @@ export function KbosShell() {
   }, [folderView, loadTree, openDoc]);
 
   const renderDocPane = useCallback(
-    (panePath: string | null, paneFolderView: string | null, opts?: { isSplit?: boolean }) => {
+    (panePath: string | null, paneFolderView: string | null, opts?: { isSplit?: boolean; localFileId?: string | null }) => {
       const onOpen = opts?.isSplit ? openDocInSplit : openDoc;
       const onOpenFld = opts?.isSplit
         ? (fp: string) => { setSplitFolderView(fp); setSplitPath(null); }
         : openFolder;
+      if (opts?.localFileId) {
+        return <LocalFileWorkspace fileId={opts.localFileId} autosaveSeconds={autosaveSeconds} />;
+      }
       if (panePath?.endsWith(".pdf")) {
         return <PdfViewer filePath={panePath} fileName={panePath.split("/").pop()} />;
       }
@@ -670,7 +701,7 @@ export function KbosShell() {
             <BookmarksManager />
           ) : appView === "tasks" ? (
             <TasksManager />
-          ) : selected === null && folderView === null && !splitEnabled ? (
+          ) : selected === null && folderView === null && !splitEnabled && !tabs[activeTabIdx]?.localFileId ? (
             <DashboardView
               tree={tree}
               onOpenDoc={openDoc}
@@ -715,12 +746,12 @@ export function KbosShell() {
                     </button>
                   </div>
                   <ResizableSplit
-                    left={renderDocPane(selected, folderView)}
+                    left={renderDocPane(selected, folderView, { localFileId: tabs[activeTabIdx]?.localFileId })}
                     right={renderDocPane(splitPath, splitFolderView, { isSplit: true })}
                   />
                 </>
               ) : (
-                renderDocPane(selected, folderView)
+                renderDocPane(selected, folderView, { localFileId: tabs[activeTabIdx]?.localFileId })
               )}
             </>
           )}
@@ -761,6 +792,8 @@ export function KbosShell() {
             const data = await r.json();
             if (r.ok && data.path) openDoc(data.path);
           }}
+          onOpenLocalFile={() => void openLocalFileTab()}
+          onNewLocalFile={() => void newLocalFileTab()}
           onNewFromTemplate={(tplPath) => {
             setTemplatePick({ path: tplPath });
             setTemplateName("");

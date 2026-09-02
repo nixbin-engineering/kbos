@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Folder, Hash, LayoutTemplate, Search, Zap } from "lucide-react";
+import { FileText, Folder, HardDrive, Hash, LayoutTemplate, Search, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isLocalFileSupported } from "@/lib/local-file";
 import type { SearchHit, TemplateEntry, TreeNode } from "@/lib/types";
 
 type Action = {
@@ -23,6 +24,8 @@ type Props = {
   onOpenAiChat: () => void;
   onOpenJournal: () => void;
   onNewFromTemplate?: (templatePath: string) => void;
+  onOpenLocalFile?: () => void;
+  onNewLocalFile?: () => void;
 };
 
 function flattenTree(node: TreeNode | null): TreeNode[] {
@@ -53,6 +56,8 @@ export function CommandPalette({
   onOpenAiChat,
   onOpenJournal,
   onNewFromTemplate,
+  onOpenLocalFile,
+  onNewLocalFile,
 }: Props) {
   const [query, setQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
@@ -90,6 +95,28 @@ export function CommandPalette({
       icon: <FileText className="h-4 w-4" />,
       onSelect: () => { onOpenJournal(); onClose(); },
     },
+    ...(onOpenLocalFile && isLocalFileSupported()
+      ? [
+          {
+            id: "open-local-file",
+            label: "Open local file…",
+            description: "Edit a file on this device — no server needed",
+            icon: <HardDrive className="h-4 w-4" />,
+            onSelect: () => { onOpenLocalFile(); onClose(); },
+          },
+        ]
+      : []),
+    ...(onNewLocalFile && isLocalFileSupported()
+      ? [
+          {
+            id: "new-local-file",
+            label: "New local file…",
+            description: "Create a file on this device — no server needed",
+            icon: <HardDrive className="h-4 w-4" />,
+            onSelect: () => { onNewLocalFile(); onClose(); },
+          },
+        ]
+      : []),
   ];
 
   const allNodes = flattenTree(tree);

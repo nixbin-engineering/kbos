@@ -1,6 +1,6 @@
 "use client";
 
-import { Columns2, FileText, Folder, Home, PanelLeftClose, Plus, X } from "lucide-react";
+import { Columns2, FileText, Folder, HardDrive, Home, PanelLeftClose, Plus, X } from "lucide-react";
 import type { Tab } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +15,9 @@ type Props = {
 };
 
 function tabLabel(tab: Tab): string {
+  if (tab.localFileId) {
+    return tab.localFileName ?? "Local file";
+  }
   if (tab.path) {
     const name = tab.path.split("/").pop() ?? tab.path;
     return name.replace(/\.md(\.enc)?$/, "");
@@ -42,11 +45,13 @@ export function TabBar({ tabs, activeIdx, splitEnabled, onActivate, onClose, onN
               )}
               onClick={() => onActivate(i)}
             >
-              {tab.folderView !== null
-                ? tab.folderView === ""
-                  ? <Home className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                  : <Folder className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                : <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
+              {tab.localFileId
+                ? <HardDrive className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                : tab.folderView !== null
+                  ? tab.folderView === ""
+                    ? <Home className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                    : <Folder className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                  : <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
               }
               <span className="max-w-[120px] truncate">{tabLabel(tab)}</span>
               <button

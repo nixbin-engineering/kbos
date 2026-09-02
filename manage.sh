@@ -7,6 +7,7 @@ cd "$ROOT"
 
 ENV_FILE="${ENV_FILE:-.env}"
 VAULT_DIR="${VAULT_DIR:-./vault}"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/nixbin-engineering/kbos}"
 
 red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -48,6 +49,7 @@ COMMANDS
   down | stop             Stop services
   restart                 Restart web service
   logs                    Follow web logs
+  shell                   Open a shell in the web container
   open | url              Print web UI URL
   status                  Compose status + API health check
 
@@ -59,7 +61,23 @@ COMMANDS
                           ./manage.sh kb -V /vault user add alice --admin -p secret
                           ./manage.sh kb -V /vault user list
 
+  user:list               List local users (username, role, created)
+  user:search QUERY       Search local users by username substring
+  user:show USERNAME      Show one user's details
+  user:password USERNAME [-p PASS]   Reset a user's password (prompts if omitted)
+  user:promote USERNAME   Grant admin role
+  user:demote USERNAME    Remove admin role (back to plain user)
+
   fix-perms               chown vault/ to your user (fixes root-owned files)
+
+  docker:version          Show current release tag (git) and what --patch/--minor/--major would produce
+  docker:build --prod [--major|--minor|--patch|-t TAG]
+                          Build image from web/Dockerfile, tagged $IMAGE_REPO:TAG + :latest
+                          (no bump/-t: reuses current release tag; does not push or tag git)
+  docker:push --prod [--major|--minor|--patch|-t TAG]
+                          Build + push $IMAGE_REPO:TAG and :latest
+                          (--major/--minor/--patch also creates and pushes a git release tag)
+  deploy:release          On the prod server: git pull --ff-only, pull the new image, up -d
 
   help | -h | --help      Show this help
 
@@ -129,6 +147,11 @@ EXAMPLES
   ./manage.sh search tag:welcome
   ./manage.sh kb -V /vault doctor
   VAULT_PATH=/data/notes ./manage.sh setup
+
+  ./manage.sh docker:version
+  ./manage.sh docker:build --prod --patch
+  ./manage.sh docker:push --prod --minor
+  ./manage.sh deploy:release   # run on the prod server
 
 
 ARCHITECTURE
@@ -260,7 +283,134 @@ cmd_status() {
 cmd_kb() {
   load_env
   ensure_vault_dir
-  dc run --rm --entrypoint kb "$@"
+  dc run --rm --entrypoint kb init "$@"
+}
+
+cmd_user() {
+  load_env
+  ensure_vault_dir
+  dc run --rm --entrypoint kb init -V /vault user "$@"
+}
+
+cmd_shell() {
+  load_env
+  dc exec web sh "$@"
+}
+
+# Release versioning is tracked as git tags (vMAJOR.MINOR.PATCH), not a file —
+# the tag *is* the record of what was released, and it travels with the repo.
+current_release_version() {
+  git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | sed -n '1p'
+}
+
+next_release_version() {
+  local bump="$1" latest raw major minor patch
+  latest="$(current_release_version)"
+  if [[ -z "$latest" ]]; then
+    case "$bump" in
+      major) echo "v1.0.0" ;;
+      minor) echo "v0.1.0" ;;
+      patch) echo "v0.0.1" ;;
+      *) red "Unknown bump: $bump"; exit 1 ;;
+    esac
+    return 0
+  fi
+  raw="${latest#v}"
+  IFS='.' read -r major minor patch <<<"$raw"
+  case "$bump" in
+    major) major=$((major + 1)); minor=0; patch=0 ;;
+    minor) minor=$((minor + 1)); patch=0 ;;
+    patch) patch=$((patch + 1)) ;;
+    *) red "Unknown bump: $bump"; exit 1 ;;
+  esac
+  echo "v${major}.${minor}.${patch}"
+}
+
+cmd_docker_version() {
+  local current
+  current="$(current_release_version)"
+  if [[ -z "$current" ]]; then
+    bold "No release tags found."
+  else
+    green "Current release : $current"
+  fi
+  bold "Next --patch    : $(next_release_version patch)"
+  bold "Next --minor    : $(next_release_version minor)"
+  bold "Next --major    : $(next_release_version major)"
+}
+
+# Parses --major/--minor/--patch/-t TAG (mutually exclusive) into $TAG_ARG,
+# falling back to the current release tag when none is given.
+resolve_release_tag() {
+  local bump="" tag="" next_is_tag=false a
+  for a in "$@"; do
+    if $next_is_tag; then tag="$a"; next_is_tag=false; continue; fi
+    case "$a" in
+      --major) bump=major ;;
+      --minor) bump=minor ;;
+      --patch) bump=patch ;;
+      -t|--tag) next_is_tag=true ;;
+      --prod) ;;
+      *) red "Unknown flag: $a"; exit 1 ;;
+    esac
+  done
+  if [[ -n "$tag" && -n "$bump" ]]; then
+    red "Use either -t/--tag or --major/--minor/--patch, not both."
+    exit 1
+  fi
+  if [[ -n "$bump" ]]; then
+    TAG_ARG="$(next_release_version "$bump")"
+    BUMP_KIND="$bump"
+  elif [[ -n "$tag" ]]; then
+    TAG_ARG="$tag"
+    BUMP_KIND=""
+  else
+    TAG_ARG="$(current_release_version)"
+    BUMP_KIND=""
+    [[ -n "$TAG_ARG" ]] || { red "No release tag found — pass --major/--minor/--patch or -t TAG."; exit 1; }
+  fi
+}
+
+cmd_docker_build() {
+  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:build --prod [--major|--minor|--patch|-t TAG]"; exit 1; }
+  local TAG_ARG BUMP_KIND
+  resolve_release_tag "$@"
+  bold "Building ${IMAGE_REPO}:${TAG_ARG} (+ :latest) from web/Dockerfile"
+  docker build -f web/Dockerfile -t "${IMAGE_REPO}:${TAG_ARG}" -t "${IMAGE_REPO}:latest" .
+  green "Built ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
+}
+
+cmd_docker_push() {
+  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:push --prod [--major|--minor|--patch|-t TAG]"; exit 1; }
+  local TAG_ARG BUMP_KIND
+  resolve_release_tag "$@"
+  cmd_docker_build --prod -t "$TAG_ARG"
+  bold "Pushing ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
+  docker push "${IMAGE_REPO}:${TAG_ARG}"
+  docker push "${IMAGE_REPO}:latest"
+  green "Pushed ${IMAGE_REPO}:${TAG_ARG} (and :latest)"
+  if [[ -n "$BUMP_KIND" ]]; then
+    bold "Tagging release ${TAG_ARG} in git"
+    git tag -a "$TAG_ARG" -m "Release $TAG_ARG"
+    git push origin "$TAG_ARG"
+    green "Pushed git tag $TAG_ARG"
+  fi
+}
+
+cmd_deploy_release() {
+  bold "Deploying latest release"
+  if [[ -d .git ]]; then
+    bold "Pulling latest repo changes…"
+    git pull --ff-only
+  fi
+  load_env
+  ensure_vault_dir
+  bold "Pulling latest images…"
+  dc pull
+  bold "Starting services…"
+  dc up -d
+  green "Deployed. URL: http://localhost:${KBOS_PORT}"
+  dc ps
 }
 
 main() {
@@ -281,25 +431,51 @@ main() {
     down|stop) load_env && dc down "$@" ;;
     restart) load_env && dc restart web "$@" ;;
     logs) load_env && dc logs -f web "$@" ;;
+    shell) cmd_shell "$@" ;;
     open|url) cmd_open ;;
     status) cmd_status ;;
     init) load_env && ensure_vault_dir && fix_perms && dc run --rm init ;;
     rebuild)
       load_env
-      dc run --rm --entrypoint kb -V /vault rebuild "$@"
+      dc run --rm --entrypoint kb init -V /vault rebuild "$@"
       ;;
     doctor)
       load_env
-      dc run --rm --entrypoint kb -V /vault doctor "$@"
+      dc run --rm --entrypoint kb init -V /vault doctor "$@"
       ;;
     search)
       [[ $# -ge 1 ]] || { red "Usage: ./manage.sh search QUERY"; exit 1; }
       load_env
-      dc run --rm --entrypoint kb -V /vault search "$@"
+      dc run --rm --entrypoint kb init -V /vault search "$@"
       ;;
     kb)
       cmd_kb "$@"
       ;;
+    user:list)     cmd_user list ;;
+    user:search)
+      [[ $# -ge 1 ]] || { red "Usage: ./manage.sh user:search QUERY"; exit 1; }
+      cmd_user search "$@"
+      ;;
+    user:show)
+      [[ $# -ge 1 ]] || { red "Usage: ./manage.sh user:show USERNAME"; exit 1; }
+      cmd_user show "$@"
+      ;;
+    user:password)
+      [[ $# -ge 1 ]] || { red "Usage: ./manage.sh user:password USERNAME [-p PASSWORD]"; exit 1; }
+      cmd_user passwd "$@"
+      ;;
+    user:promote)
+      [[ $# -ge 1 ]] || { red "Usage: ./manage.sh user:promote USERNAME"; exit 1; }
+      cmd_user promote "$@"
+      ;;
+    user:demote)
+      [[ $# -ge 1 ]] || { red "Usage: ./manage.sh user:demote USERNAME"; exit 1; }
+      cmd_user demote "$@"
+      ;;
+    docker:version) cmd_docker_version ;;
+    docker:build)   cmd_docker_build "$@" ;;
+    docker:push)    cmd_docker_push "$@" ;;
+    deploy:release) cmd_deploy_release ;;
     *)
       red "Unknown command: $cmd"
       usage

@@ -15,6 +15,7 @@ export type RetrievedChunk = {
 
 const MAX_CONTEXT_CHARS = 14000;
 const EXCERPT_LEN = 2400;
+const MAX_MAP_CHARS = 6000;
 
 // Common words that add no retrieval value
 const STOP_WORDS = new Set([
@@ -173,6 +174,34 @@ export async function retrieveContext(
     total += len;
     return true;
   });
+}
+
+/** Lightweight index of every note's title/path/tags — lets the model answer
+ * vault-wide overview questions that chunk retrieval can't match against. */
+export async function buildVaultMap(folder = ""): Promise<string> {
+  const entries: { rel: string; title: string; tags: string[] }[] = [];
+
+  await walkPlainDocs(async (rel, raw) => {
+    if (folder && !inFolder(rel, folder)) return;
+    const { data } = matter(raw);
+    const title = (data.title as string) || path.basename(rel, ".md");
+    const tags = Array.isArray(data.tags) ? (data.tags as string[]) : [];
+    entries.push({ rel, title, tags });
+  });
+
+  if (entries.length === 0) return "(No notes found.)";
+
+  entries.sort((a, b) => a.rel.localeCompare(b.rel));
+  const lines = entries.map((e) => {
+    const tagStr = e.tags.length ? ` [${e.tags.join(", ")}]` : "";
+    return `- ${e.title} (${e.rel})${tagStr}`;
+  });
+
+  let out = lines.join("\n");
+  if (out.length > MAX_MAP_CHARS) {
+    out = `${out.slice(0, MAX_MAP_CHARS)}\n… (truncated — vault has more notes than shown here)`;
+  }
+  return out;
 }
 
 export function buildContextBlock(chunks: RetrievedChunk[]): string {

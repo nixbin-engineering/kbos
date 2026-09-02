@@ -22,6 +22,7 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 RUN apk add --no-cache ca-certificates
 COPY --from=kb /kb /usr/local/bin/kb
+COPY scripts /scripts
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=builder /app/public ./public

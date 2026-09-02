@@ -132,6 +132,20 @@ func (s *Store) SetPassword(username, password string) error {
 	return nil
 }
 
+// SetRole changes a user's role without touching their password.
+func (s *Store) SetRole(username, role string) error {
+	u, ok := s.Users[username]
+	if !ok {
+		return fmt.Errorf("user not found: %s", username)
+	}
+	if role != "admin" && role != "user" {
+		return fmt.Errorf("invalid role: %s (must be admin or user)", role)
+	}
+	u.Role = role
+	s.Users[username] = u
+	return nil
+}
+
 // Authenticate returns username and role if valid.
 func (s *Store) Authenticate(username, password string) (string, string, error) {
 	u, ok := s.Users[username]

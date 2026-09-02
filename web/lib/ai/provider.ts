@@ -8,6 +8,12 @@ function resolveBaseUrl(settings: AISettings): string {
   return base;
 }
 
+function resolveEmbedBaseUrl(settings: AISettings): string {
+  const fromEnv = process.env.AI_EMBED_BASE_URL?.trim();
+  const base = fromEnv || settings.embed_base_url?.trim();
+  return base ? base.replace(/\/$/, "") : resolveBaseUrl(settings);
+}
+
 function resolveApiKey(): string {
   return process.env.AI_API_KEY?.trim() || "ollama";
 }
@@ -73,7 +79,7 @@ export async function embedText(settings: AISettings, text: string): Promise<num
   const embedModel = settings.embed_model?.trim();
   if (!embedModel) throw new Error("No embedding model configured");
 
-  const baseUrl = resolveBaseUrl(settings);
+  const baseUrl = resolveEmbedBaseUrl(settings);
   const res = await fetch(`${baseUrl}/embeddings`, {
     method: "POST",
     headers: {
@@ -119,6 +125,18 @@ export async function probeAI(settings: AISettings): Promise<{ ok: boolean; mess
     const models = await fetchModels(baseUrl);
     if (models.length > 0) return { ok: true, message: "Connected" };
     return { ok: false, message: "Connected but no models available" };
+  } catch (e) {
+    return { ok: false, message: String(e) };
+  }
+}
+
+export async function probeEmbedAI(settings: AISettings): Promise<{ ok: boolean; message: string }> {
+  if (!settings.enabled) return { ok: false, message: "AI is disabled in settings" };
+  if (!settings.embed_model?.trim()) return { ok: false, message: "No embedding model configured" };
+
+  try {
+    const embedding = await embedText(settings, "connection test");
+    return { ok: true, message: `Connected · ${embedding.length}-dim vectors` };
   } catch (e) {
     return { ok: false, message: String(e) };
   }

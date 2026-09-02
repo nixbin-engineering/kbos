@@ -59,6 +59,7 @@ export type AISettings = {
   base_url: string;
   model: string;
   embed_model?: string;
+  embed_base_url?: string;
 };
 
 export type UISettings = {
@@ -105,4 +106,8 @@ export type Tab = {
   id: string;
   path: string | null;
   folderView: string | null;
+  /** Set when this tab is editing a file on the local device rather than a vault doc. */
+  localFileId?: string | null;
+  /** Display name for a local file tab, captured at open time. */
+  localFileName?: string | null;
 };
