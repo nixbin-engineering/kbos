@@ -65,7 +65,7 @@ export function mergeLiveFolderIndex(
   const folder = folderRel.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   const entries = liveFolderEntries(tree, folder, cached);
   const folderTitle =
-    cached?.folderTitle ?? (folder ? pathBasename(folder) : "docs");
+    cached?.folderTitle ?? (folder ? pathBasename(folder) : tree?.name ?? "Vault");
 
   return {
     folder,

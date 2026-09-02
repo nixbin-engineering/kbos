@@ -175,6 +175,13 @@ button, a, input, textarea, select {
 }
 .animate-fade-in { animation: fade-in 0.18s ease-out; }
 
+@keyframes theme-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(0.94); }
+  100% { transform: scale(1); }
+}
+.animate-theme-pop { animation: theme-pop 0.28s ease-out; }
+
 /* ── Task due badges ─────────────────────────────────────────────────────────── */
 .due-overdue { background: rgba(239,68,68,0.15);  color: #f87171; border: 1px solid rgba(239,68,68,0.3);  }
 .due-today   { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
@@ -239,8 +246,9 @@ button, a, input, textarea, select {
 .markdown-preview li { margin-bottom: 0.35rem; line-height: 1.7; }
 .markdown-preview li > ul, .markdown-preview li > ol { margin: 0.25rem 0 0.25rem 1.25rem; }
 
-/* Inline code */
-.markdown-preview code:not(pre code) {
+/* Inline code — excludes .kbos-code-block's <code>, which has no <pre> ancestor
+   (SyntaxHighlighter uses PreTag="div") but is still a full code block, not inline code. */
+.markdown-preview code:not(pre code):not(.kbos-code-block code) {
   background: var(--accent-dim);
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
@@ -257,6 +265,16 @@ button, a, input, textarea, select {
 }
 .markdown-preview pre code {
   font-size: 0.8125rem;
+}
+
+/* Some Prism themes (react-syntax-highlighter) underline or border specific
+   tokens (e.g. CSS url strings, "entity" tokens) — flatten all of that so
+   code lines render clean, regardless of which theme is selected. */
+.kbos-code-block,
+.kbos-code-block * {
+  text-decoration: none !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
 /* Links */

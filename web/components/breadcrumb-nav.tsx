@@ -6,15 +6,16 @@ type Props = {
   path: string | null;
   onOpenDoc: (path: string) => void;
   onOpenFolder: (folder: string) => void;
+  rootLabel?: string;
 };
 
-export function BreadcrumbNav({ path, onOpenDoc, onOpenFolder }: Props) {
+export function BreadcrumbNav({ path, onOpenDoc, onOpenFolder, rootLabel = "Vault" }: Props) {
   if (!path) return null;
 
   const segments = path.split("/");
   // Build crumbs: each segment links to either a folder or the file itself
   const crumbs: { label: string; onClick: () => void }[] = [
-    { label: "docs", onClick: () => onOpenFolder("") },
+    { label: rootLabel, onClick: () => onOpenFolder("") },
   ];
 
   for (let i = 0; i < segments.length; i++) {

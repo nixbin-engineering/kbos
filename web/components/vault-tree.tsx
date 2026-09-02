@@ -104,7 +104,7 @@ export function VaultTree({
             rootActive && "bg-[var(--accent)]/15 ring-1 ring-[var(--accent)]",
           )}
           onContextMenu={(e) =>
-            openContext(e, { itemType: "root", itemPath: "", itemName: "docs", parentPath: "" })
+            openContext(e, { itemType: "root", itemPath: "", itemName: tree.name, parentPath: "" })
           }
         >
           <button
@@ -113,7 +113,7 @@ export function VaultTree({
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
             <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" />
-            <span className="truncate font-medium">docs</span>
+            <span className="truncate font-medium">{tree.name}</span>
             {tree && (
               <span className="ml-1 shrink-0 rounded px-1 text-[10px] text-[var(--muted)] opacity-60">
                 {countFiles(tree)}

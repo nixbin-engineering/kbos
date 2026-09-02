@@ -1,11 +1,25 @@
 import fs from "fs/promises";
 import path from "path";
+import yaml from "yaml";
 import matter from "gray-matter";
 import type { DocMeta, DocResponse, FolderIndex, FolderIndexEntry, SearchHit, TemplateEntry, TreeNode } from "./types";
 import { kbDecryptToMemory } from "./kb-runner";
 import { mergeTags } from "./tags";
 
 const VAULT_PATH = process.env.VAULT_PATH || "/vault";
+
+// Falls back to "Vault" (not the internal "docs" folder name) whenever
+// config/kb.yaml is missing/unreadable or has no vault.name set.
+export async function getVaultName(): Promise<string> {
+  try {
+    const raw = await fs.readFile(path.join(vaultRoot(), "config", "kb.yaml"), "utf8");
+    const doc = yaml.parse(raw) as { vault?: { name?: string } } | null;
+    const name = doc?.vault?.name?.trim();
+    return name || "Vault";
+  } catch {
+    return "Vault";
+  }
+}
 
 export function vaultRoot(): string {
   return path.resolve(VAULT_PATH);
@@ -52,11 +66,12 @@ export function safeVaultPath(base: string, rel: string): string {
 }
 
 export async function listTree(hideDir?: string): Promise<TreeNode> {
-  return buildTree(docsDir(), "", hideDir);
+  const vaultName = await getVaultName();
+  return buildTree(docsDir(), "", hideDir, vaultName);
 }
 
-async function buildTree(absDir: string, rel: string, hideDir?: string): Promise<TreeNode> {
-  const name = rel ? path.basename(rel) : "docs";
+async function buildTree(absDir: string, rel: string, hideDir?: string, rootName = "Vault"): Promise<TreeNode> {
+  const name = rel ? path.basename(rel) : rootName;
   const entries = await fs.readdir(absDir, { withFileTypes: true });
   const children: TreeNode[] = [];
 
@@ -255,7 +270,7 @@ export async function getFolderIndex(folderRel: string): Promise<FolderIndex> {
   }
 
   const entries = await listFolderEntries(dirPath, folder);
-  const folderTitle = folder ? path.basename(folder) : "docs";
+  const folderTitle = folder ? path.basename(folder) : await getVaultName();
 
   return { folder, folderTitle, indexPath: indexDoc ? indexRel : null, indexDoc, entries };
 }

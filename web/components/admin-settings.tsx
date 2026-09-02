@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import type { AISettings } from "@/lib/types";
-import { THEMES, type ThemeId } from "@/lib/themes";
+import { applyTheme, THEMES, type ThemeId } from "@/lib/themes";
 import { useTheme } from "./theme-provider";
 
 type Props = {
@@ -378,6 +378,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
   ];
 
   const { theme: currentTheme, setTheme } = useTheme();
+  const [justAppliedTheme, setJustAppliedTheme] = useState<ThemeId | null>(null);
 
   const THEME_ORDER: ThemeId[] = ["indigo", "dark", "midnight", "slate", "amber", "nord", "dracula", "solarized", "linux-terminal", "manjaro", "light", "auto", "ocean", "blue-white", "mono", "rose"];
   const THEME_PREVIEW: Record<ThemeId, { bg: string; panel: string; accent: string }> = {
@@ -490,7 +491,6 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
 
                 {/* Appearance tab */}
                 {activeTab === "appearance" && (() => {
-                  const confirmedTheme = currentTheme;
                   return (
                   <div className="space-y-5">
                     <div className="flex items-center justify-between">
@@ -499,23 +499,27 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
                     </div>
                     <div
                       className="grid grid-cols-3 gap-2"
-                      onMouseLeave={() => setTheme(confirmedTheme)}
+                      onMouseLeave={() => applyTheme(currentTheme)}
                     >
                       {THEME_ORDER.map((id) => {
                         const preview = THEME_PREVIEW[id];
-                        const active = confirmedTheme === id;
+                        const active = currentTheme === id;
                         const lightBg = ["#ffffff", "#f5f6ff", "#fff5f7", "#f0f7ff"].includes(preview.bg);
                         return (
                           <button
                             key={id}
                             type="button"
-                            onMouseEnter={() => setTheme(id)}
-                            onClick={() => setTheme(id)}
+                            onMouseEnter={() => applyTheme(id)}
+                            onClick={() => {
+                              setTheme(id);
+                              setJustAppliedTheme(id);
+                              window.setTimeout(() => setJustAppliedTheme((cur) => (cur === id ? null : cur)), 280);
+                            }}
                             className={`relative overflow-hidden rounded-lg border p-3 text-left transition-all ${
                               active
                                 ? "border-[var(--accent)] ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--background)]"
                                 : "border-[var(--border)] hover:border-[var(--border-strong,var(--border))]"
-                            }`}
+                            } ${justAppliedTheme === id ? "animate-theme-pop" : ""}`}
                             style={{ background: preview.bg }}
                           >
                             <div className="mb-2 flex gap-1">

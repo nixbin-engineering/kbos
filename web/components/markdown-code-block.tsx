@@ -301,7 +301,10 @@ export function MarkdownCodeBlock({ code, language = "text" }: Props) {
       </div>
 
       {/* Code area */}
-      <div style={{ overflowX: wrap ? "hidden" : "auto" }}>
+      {/* No border on the line-number gutter: a border repeated per-line (one span
+          per line) rendered as visible horizontal seams under every line at some
+          zoom levels/themes. Spacing alone separates numbers from code instead. */}
+      <div className="kbos-code-block" style={{ overflowX: wrap ? "hidden" : "auto" }}>
         <SyntaxHighlighter
           language={lang}
           style={getStyle(themeKey)}
@@ -311,7 +314,6 @@ export function MarkdownCodeBlock({ code, language = "text" }: Props) {
             paddingRight: "0.75em",
             color: dark ? "#3a3f55" : "#c1c8d4",
             userSelect: "none",
-            borderRight: `1px solid ${dark ? "#242840" : "#e2e6ea"}`,
             marginRight: "1em",
             background: "transparent",
           }}
@@ -325,7 +327,14 @@ export function MarkdownCodeBlock({ code, language = "text" }: Props) {
             wordBreak: wrap ? "break-all" : "normal",
           }}
           codeTagProps={{
-            style: { fontFamily: "'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", background: "transparent" },
+            style: {
+              fontFamily: "'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              background: "transparent",
+              textDecoration: "none",
+              border: "none",
+              borderRadius: 0,
+              padding: 0,
+            },
           }}
           PreTag="div"
           wrapLines

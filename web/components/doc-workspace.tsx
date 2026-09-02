@@ -47,6 +47,22 @@ function bodyFromRaw(raw: string): string {
   return matter(raw).content;
 }
 
+const TASK_MARKER_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]/gm;
+
+// Flips the `taskIndex`-th (0-based, document order) `- [ ]`/`- [x]` marker in
+// `body` to `checked`, then splices the result back into `raw` at the same
+// offset — `raw` also carries the YAML frontmatter that `body` excludes.
+function toggleTaskInRaw(raw: string, body: string, taskIndex: number, checked: boolean): string {
+  const start = raw.indexOf(body);
+  if (start === -1) return raw;
+  let count = -1;
+  const newBody = body.replace(TASK_MARKER_RE, (match, prefix: string) => {
+    count += 1;
+    return count === taskIndex ? `${prefix}[${checked ? "x" : " "}]` : match;
+  });
+  return raw.slice(0, start) + newBody + raw.slice(start + body.length);
+}
+
 function fmTagsFromRaw(raw: string): string[] {
   const t = matter(raw).data.tags;
   return Array.isArray(t) ? (t as string[]) : [];
@@ -329,6 +345,16 @@ export function DocWorkspace({
     [mode, body],
   );
 
+  const toggleTask = useCallback(
+    (index: number, checked: boolean) => {
+      setRaw((prev) => toggleTaskInRaw(prev, bodyFromRaw(prev), index, checked));
+      setDirty(true);
+      setDiskChanged(false);
+      setSaveState("pending");
+    },
+    [],
+  );
+
   const uploadImage = useCallback(
     async (file: File) => {
       if (!path) return;
@@ -415,7 +441,12 @@ export function DocWorkspace({
   const preview = (
     <article ref={setPreviewRef} className="markdown-preview h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl px-6 py-8 md:px-10 md:py-10">
-        <MarkdownBody body={body} docPath={path ?? undefined} onOpenDoc={onOpenDoc} />
+        <MarkdownBody
+          body={body}
+          docPath={path ?? undefined}
+          onOpenDoc={onOpenDoc}
+          onToggleTask={doc?.encrypted ? undefined : toggleTask}
+        />
         {isIndexPage && liveFolderIndex && (
           <FolderContentsPanel index={liveFolderIndex} onOpenDoc={onOpenDoc} onOpenFolder={onOpenFolder} />
         )}
@@ -590,7 +621,7 @@ export function DocWorkspace({
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
         <div className="min-w-0">
-          <BreadcrumbNav path={path} onOpenDoc={onOpenDoc} onOpenFolder={onOpenFolder} />
+          <BreadcrumbNav path={path} onOpenDoc={onOpenDoc} onOpenFolder={onOpenFolder} rootLabel={tree?.name} />
           <h1 className="truncate text-base font-semibold leading-tight">
             {doc?.meta.title || path?.split("/").pop()?.replace(/\.md(\.enc)?$/, "") || path}
             {doc?.encrypted && (

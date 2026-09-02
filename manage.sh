@@ -75,8 +75,12 @@ COMMANDS
                           Build image from web/Dockerfile, tagged $IMAGE_REPO:TAG + :latest
                           (no bump/-t: reuses current release tag; does not push or tag git)
   docker:push --prod [--major|--minor|--patch|-t TAG]
-                          Build + push $IMAGE_REPO:TAG and :latest
+                          Smoke-test the running stack, then build + push
+                          $IMAGE_REPO:TAG and :latest
                           (--major/--minor/--patch also creates and pushes a git release tag)
+  secrets:rotate [KEY ...]
+                          Rotate secret-like keys in .env (or only the ones named)
+                          Backs up .env first; does not restart anything
   deploy:release          On the prod server: git pull --ff-only, pull the new image, up -d
 
   help | -h | --help      Show this help
@@ -380,10 +384,25 @@ cmd_docker_build() {
   green "Built ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
 }
 
+# Smoke test gate for docker:push — blocks the release if the running stack's
+# health endpoint isn't reachable/healthy. Doesn't build anything itself.
+cmd_smoke_test() {
+  load_env
+  bold "Smoke test: checking ${KBOS_PORT}/api/health…"
+  if curl -sf "http://localhost:${KBOS_PORT}/api/health" >/dev/null 2>&1; then
+    green "Smoke test passed: API is healthy."
+  else
+    red "Smoke test FAILED: http://localhost:${KBOS_PORT}/api/health is not reachable/healthy."
+    red "Start the stack first (./manage.sh start) and verify it's healthy, then retry."
+    exit 1
+  fi
+}
+
 cmd_docker_push() {
   [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:push --prod [--major|--minor|--patch|-t TAG]"; exit 1; }
   local TAG_ARG BUMP_KIND
   resolve_release_tag "$@"
+  cmd_smoke_test
   cmd_docker_build --prod -t "$TAG_ARG"
   bold "Pushing ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
   docker push "${IMAGE_REPO}:${TAG_ARG}"
@@ -395,6 +414,54 @@ cmd_docker_push() {
     git push origin "$TAG_ARG"
     green "Pushed git tag $TAG_ARG"
   fi
+}
+
+cmd_secrets_rotate() {
+  load_env
+  local keys=() k backup
+  if [[ $# -gt 0 ]]; then
+    keys=("$@")
+  else
+    while IFS='=' read -r k _; do
+      [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      shopt -s nocasematch
+      if [[ "$k" =~ (_SECRET|_PASSWORD|_KEY|_TOKEN|_PASS|^JWT_) ]]; then
+        keys+=("$k")
+      fi
+      shopt -u nocasematch
+    done <"$ENV_FILE"
+  fi
+
+  if [[ "${#keys[@]}" -eq 0 ]]; then
+    bold "No secret-like keys found in ${ENV_FILE} (looked for *_SECRET/*_PASSWORD/*_KEY/*_TOKEN/*_PASS/JWT_*)."
+    exit 0
+  fi
+
+  bold "About to rotate ${#keys[@]} key(s) in ${ENV_FILE}:"
+  printf '  %s\n' "${keys[@]}"
+  read -r -p "Continue? [y/N] " confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || { red "Aborted."; exit 1; }
+
+  backup="${ENV_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$ENV_FILE" "$backup"
+  green "Backed up ${ENV_FILE} → ${backup}"
+
+  for k in "${keys[@]}"; do
+    if ! grep -q "^${k}=" "$ENV_FILE"; then
+      red "Skipping ${k}: not found in ${ENV_FILE}"
+      continue
+    fi
+    local new_val tmp
+    new_val="$(openssl rand -base64 32 | tr -d '\n')"
+    tmp="$(mktemp)"
+    awk -v key="$k" -v val="$new_val" -F= 'BEGIN{OFS="="} $1==key{$0=key"="val} {print}' "$ENV_FILE" >"$tmp"
+    mv "$tmp" "$ENV_FILE"
+    green "Rotated ${k}"
+  done
+
+  bold "Done. This only rewrote ${ENV_FILE} — it did not restart anything and did not"
+  bold "rotate credentials on any external system these values correspond to."
+  bold "Run ./manage.sh restart (or deploy:release on the server) to apply the new values."
 }
 
 cmd_deploy_release() {
@@ -475,6 +542,7 @@ main() {
     docker:version) cmd_docker_version ;;
     docker:build)   cmd_docker_build "$@" ;;
     docker:push)    cmd_docker_push "$@" ;;
+    secrets:rotate) cmd_secrets_rotate "$@" ;;
     deploy:release) cmd_deploy_release ;;
     *)
       red "Unknown command: $cmd"

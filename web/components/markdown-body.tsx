@@ -1,6 +1,6 @@
 "use client";
 
-import React, { isValidElement, useMemo } from "react";
+import React, { isValidElement, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -17,6 +17,11 @@ type Props = {
   docPath?: string;
   onOpenDoc?: (path: string) => void;
   embedDepth?: number;
+  // When provided, task-list checkboxes become clickable. `index` is the
+  // 0-based ordinal of the checkbox among all task items in this document,
+  // top to bottom — the caller uses it to find and flip the matching
+  // `- [ ]`/`- [x]` marker in the raw source.
+  onToggleTask?: (index: number, checked: boolean) => void;
 };
 
 function makeHeading(level: 1 | 2 | 3 | 4 | 5 | 6, getId: () => string) {
@@ -113,16 +118,27 @@ function PreBlock({ children }: { children?: React.ReactNode }) {
   );
 }
 
-export function MarkdownBody({ body, docPath, onOpenDoc, embedDepth = 0 }: Props) {
+export function MarkdownBody({ body, docPath, onOpenDoc, embedDepth = 0, onToggleTask }: Props) {
   const processed = useMemo(
     () => (embedDepth >= 2 ? body : preprocessWikiMarkdown(body, docPath)),
     [body, docPath, embedDepth],
   );
   const headings = useMemo(() => extractToc(body), [body]);
 
+  // Refs, not plain closure variables: `components` is memoized and reused across
+  // renders whenever its deps are unchanged, but react-markdown still re-invokes
+  // these renderer functions on every render pass — a closure-local counter would
+  // keep incrementing across renders instead of restarting at 0 each time. Reset
+  // via headingCounterRef.current = 0 / taskCounterRef.current = 0 below, right
+  // before each render's ReactMarkdown pass.
+  const headingCounterRef = useRef(0);
+  const taskCounterRef = useRef(0);
+
   const components = useMemo((): Components => {
-    let i = 0;
-    const next = () => headings[i++]?.id ?? `section-${i}`;
+    const next = () => {
+      const idx = headingCounterRef.current++;
+      return headings[idx]?.id ?? `section-${headingCounterRef.current}`;
+    };
 
     return {
       blockquote: ({ children }) => {
@@ -255,15 +271,19 @@ export function MarkdownBody({ body, docPath, onOpenDoc, embedDepth = 0 }: Props
         }
         return <li className={className} {...props}>{children}</li>;
       },
-      input: ({ type, checked, ...props }) => {
+      input: ({ type, checked, disabled: _disabled, readOnly: _readOnly, onChange: _onChange, ...props }) => {
         if (type === "checkbox") {
+          const idx = taskCounterRef.current++;
+          const interactive = Boolean(onToggleTask);
           return (
             <input
+              {...props}
               type="checkbox"
               checked={checked}
-              readOnly
-              className="mt-1 h-4 w-4 shrink-0 accent-[var(--accent)] cursor-default"
-              {...props}
+              readOnly={!interactive}
+              disabled={!interactive}
+              onChange={interactive ? () => onToggleTask!(idx, !checked) : undefined}
+              className={`mt-1 h-4 w-4 shrink-0 accent-[var(--accent)] ${interactive ? "cursor-pointer" : "cursor-default"}`}
             />
           );
         }
@@ -300,7 +320,12 @@ export function MarkdownBody({ body, docPath, onOpenDoc, embedDepth = 0 }: Props
         />
       ),
     };
-  }, [headings, docPath, onOpenDoc, embedDepth]);
+  }, [headings, docPath, onOpenDoc, embedDepth, onToggleTask]);
+
+  // Reset per-render counters right before this render's ReactMarkdown pass —
+  // see the comment above headingCounterRef/taskCounterRef.
+  headingCounterRef.current = 0;
+  taskCounterRef.current = 0;
 
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={components}>

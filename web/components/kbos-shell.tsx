@@ -30,6 +30,7 @@ import { ResizableSplit } from "./resizable-split";
 import { VaultSwitcher } from "./vault-switcher";
 import { PasswordManager } from "./password-manager";
 import { DashboardView } from "./dashboard-view";
+import { HelpButton } from "./help-panel";
 
 type Phase = "loading" | "setup" | "login" | "app";
 
@@ -641,6 +642,7 @@ export function KbosShell() {
               </span>
             </Tooltip>
           )}
+          <HelpButton />
           <UserMenu user={user} onLogout={logout} />
         </div>
       </header>
