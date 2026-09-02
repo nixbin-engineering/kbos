@@ -388,11 +388,11 @@ cmd_docker_build() {
 # health endpoint isn't reachable/healthy. Doesn't build anything itself.
 cmd_smoke_test() {
   load_env
-  bold "Smoke test: checking ${KBOS_PORT}/api/health…"
-  if curl -sf "http://localhost:${KBOS_PORT}/api/health" >/dev/null 2>&1; then
+  bold "Smoke test: checking web container's /api/health…"
+  if docker exec kbos node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
     green "Smoke test passed: API is healthy."
   else
-    red "Smoke test FAILED: http://localhost:${KBOS_PORT}/api/health is not reachable/healthy."
+    red "Smoke test FAILED: kbos container's /api/health is not reachable/healthy."
     red "Start the stack first (./manage.sh start) and verify it's healthy, then retry."
     exit 1
   fi
