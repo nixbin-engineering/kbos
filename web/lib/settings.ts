@@ -8,6 +8,8 @@ export type UISettings = {
   autosave_seconds: number;
   attachments_subdir: string;
   start_page: string;
+  open_daily_note: boolean;
+  capture_folder: string;
 };
 
 export type AISettings = {
@@ -27,13 +29,21 @@ export type SecuritySettings = {
 };
 
 export type VaultSettings = {
+  vault_name: string;
   ui: UISettings;
   ai: AISettings;
   security: SecuritySettings;
 };
 
 const defaults: VaultSettings = {
-  ui: { autosave_seconds: 5, attachments_subdir: "attachments", start_page: "home.md" },
+  vault_name: "Vault",
+  ui: {
+    autosave_seconds: 5,
+    attachments_subdir: "attachments",
+    start_page: "home.md",
+    open_daily_note: false,
+    capture_folder: "inbox",
+  },
   security: { max_unlock_attempts: 5, unlock_lockout_minutes: 15 },
   ai: {
     enabled: false,
@@ -70,12 +80,20 @@ export async function loadSettings(): Promise<VaultSettings> {
 
   const maxAttempts = security.max_unlock_attempts as number | undefined;
   const lockoutMinutes = security.unlock_lockout_minutes as number | undefined;
+  const vault = (doc.vault as Record<string, unknown>) || {};
+  const vaultName = typeof vault.name === "string" && vault.name.trim() ? vault.name.trim() : defaults.vault_name;
 
   return {
+    vault_name: vaultName,
     ui: {
       autosave_seconds: typeof secs === "number" && secs > 0 ? secs : defaults.ui.autosave_seconds,
       attachments_subdir: attachmentsSubdir,
       start_page: typeof ui.start_page === "string" ? ui.start_page.trim() : defaults.ui.start_page,
+      open_daily_note: Boolean(ui.open_daily_note),
+      capture_folder:
+        typeof ui.capture_folder === "string" && ui.capture_folder.trim()
+          ? ui.capture_folder.trim().replace(/^\/+|\/+$/g, "")
+          : defaults.ui.capture_folder,
     },
     security: {
       max_unlock_attempts: typeof maxAttempts === "number" && maxAttempts > 0 ? maxAttempts : defaults.security.max_unlock_attempts,
@@ -104,6 +122,16 @@ async function writeConfigDoc(mutator: (doc: Record<string, unknown>) => void): 
   await fs.writeFile(cfgPath(), yaml.stringify(doc), "utf8");
 }
 
+export async function saveVaultName(name: string): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("vault name required");
+  if (trimmed.length > 80) throw new Error("vault name too long");
+  await writeConfigDoc((doc) => {
+    const vault = (doc.vault as Record<string, unknown>) || {};
+    doc.vault = { ...vault, name: trimmed };
+  });
+}
+
 export async function saveUISettings(ui: Partial<UISettings> & Pick<UISettings, "autosave_seconds">): Promise<void> {
   const current = await loadSettings();
   await writeConfigDoc((doc) => {
@@ -114,6 +142,11 @@ export async function saveUISettings(ui: Partial<UISettings> & Pick<UISettings, 
           ? sanitizeAttachmentsSubdir(ui.attachments_subdir)
           : current.ui.attachments_subdir,
       start_page: ui.start_page !== undefined ? ui.start_page.trim() : current.ui.start_page,
+      open_daily_note: ui.open_daily_note !== undefined ? Boolean(ui.open_daily_note) : current.ui.open_daily_note,
+      capture_folder:
+        ui.capture_folder !== undefined
+          ? ui.capture_folder.trim().replace(/^\/+|\/+$/g, "") || defaults.ui.capture_folder
+          : current.ui.capture_folder,
     };
   });
 }

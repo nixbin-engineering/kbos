@@ -1,12 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  flattenVisibleBookmarks,
+  loadDashboards,
+  saveDashboards,
+  visibleDashboards,
+} from "@/lib/bookmarks";
 import { isAuthError, requireAuth } from "@/lib/require-auth";
-import { loadBookmarks, saveBookmarks, visibleBookmarks } from "@/lib/bookmarks";
 
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (isAuthError(auth)) return auth;
-  const all = await loadBookmarks();
-  return NextResponse.json({ bookmarks: visibleBookmarks(all, auth.user || "") });
+  const all = await loadDashboards();
+  const dashboards = visibleDashboards(all, auth.user || "");
+  return NextResponse.json({
+    dashboards,
+    bookmarks: flattenVisibleBookmarks(dashboards),
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -14,20 +23,26 @@ export async function POST(req: NextRequest) {
   if (isAuthError(auth)) return auth;
 
   const body = await req.json();
-  const { url, title, description, tags, visibility } = body as {
+  const { url, title, description, tags, visibility, dashboardId } = body as {
     url: string;
     title: string;
     description?: string;
     tags?: string[];
     visibility?: "private" | "team";
+    dashboardId?: string;
   };
 
   if (!url || !title) {
     return NextResponse.json({ error: "url and title are required" }, { status: 400 });
   }
 
-  const all = await loadBookmarks();
-  all.push({
+  const all = await loadDashboards();
+  const idx = dashboardId ? all.findIndex((d) => d.id === dashboardId) : 0;
+  if (idx === -1) {
+    return NextResponse.json({ error: "dashboard not found" }, { status: 404 });
+  }
+
+  all[idx].bookmarks.push({
     id: crypto.randomUUID(),
     url,
     title,
@@ -37,6 +52,11 @@ export async function POST(req: NextRequest) {
     visibility: visibility === "private" ? "private" : "team",
     createdAt: new Date().toISOString(),
   });
-  await saveBookmarks(all);
-  return NextResponse.json({ bookmarks: visibleBookmarks(all, auth.user || "") }, { status: 201 });
+  await saveDashboards(all);
+
+  const dashboards = visibleDashboards(all, auth.user || "");
+  return NextResponse.json(
+    { dashboards, bookmarks: flattenVisibleBookmarks(dashboards) },
+    { status: 201 }
+  );
 }

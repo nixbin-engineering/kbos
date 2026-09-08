@@ -12,11 +12,19 @@ type Props = {
   role: string;
   autosaveSeconds: number;
   onUpdated: (seconds: number) => void;
+  onVaultRenamed?: () => void;
   iconOnly?: boolean;
 };
 
 type SettingsDoc = {
-  ui: { autosave_seconds: number; attachments_subdir: string; start_page?: string };
+  vault_name?: string;
+  ui: {
+    autosave_seconds: number;
+    attachments_subdir: string;
+    start_page?: string;
+    open_daily_note?: boolean;
+    capture_folder?: string;
+  };
   ai: AISettings;
   security?: { max_unlock_attempts: number; unlock_lockout_minutes: number };
 };
@@ -110,11 +118,14 @@ function ModelPicker({
   );
 }
 
-export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly }: Props) {
+export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultRenamed, iconOnly }: Props) {
   const [open, setOpen] = useState(false);
   const [secs, setSecs] = useState(autosaveSeconds);
+  const [vaultName, setVaultName] = useState("Vault");
   const [attachmentsSubdir, setAttachmentsSubdir] = useState("attachments");
   const [startPage, setStartPage] = useState("home.md");
+  const [openDailyNote, setOpenDailyNote] = useState(false);
+  const [captureFolder, setCaptureFolder] = useState("inbox");
   const [ai, setAi] = useState<AISettings>({
     enabled: false,
     provider: "ollama",
@@ -194,9 +205,12 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
     const r = await fetch("/api/settings");
     if (r.ok) {
       const data = (await r.json()) as SettingsDoc;
+      setVaultName(data.vault_name || "Vault");
       setAi({ embed_model: "", embed_base_url: "", ...data.ai });
       setAttachmentsSubdir(data.ui.attachments_subdir || "attachments");
-      if (data.ui.start_page) setStartPage(data.ui.start_page);
+      if (data.ui.start_page !== undefined) setStartPage(data.ui.start_page);
+      setOpenDailyNote(Boolean(data.ui.open_daily_note));
+      setCaptureFolder(data.ui.capture_folder || "inbox");
       if (data.security) {
         setSecMaxAttempts(data.security.max_unlock_attempts ?? 5);
         setSecLockoutMinutes(data.security.unlock_lockout_minutes ?? 15);
@@ -233,13 +247,21 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ui: { autosave_seconds: secs, attachments_subdir: attachmentsSubdir, start_page: startPage },
+          vault: { name: vaultName },
+          ui: {
+            autosave_seconds: secs,
+            attachments_subdir: attachmentsSubdir,
+            start_page: startPage,
+            open_daily_note: openDailyNote,
+            capture_folder: captureFolder,
+          },
           ai,
         }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.statusText);
       onUpdated(data.ui.autosave_seconds);
+      onVaultRenamed?.();
       setOpen(false);
     } catch (e) {
       setError(String(e));
@@ -457,6 +479,21 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
                 {activeTab === "general" && (
                   <div className="space-y-5">
                     <div>
+                      <h3 className="mb-4 text-sm font-medium text-[var(--muted)] uppercase tracking-wide">Vault</h3>
+                      <label className="mb-4 block text-sm">
+                        Display name
+                        <input
+                          value={vaultName}
+                          onChange={(e) => setVaultName(e.target.value)}
+                          placeholder="Vault"
+                          className="mt-1.5 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm"
+                        />
+                        <span className="mt-1 block text-xs text-[var(--muted)]">
+                          Shown as the root of the notes tree in the sidebar. Stored in <code className="rounded bg-[var(--border)] px-1">config/kb.yaml</code>.
+                        </span>
+                      </label>
+                    </div>
+                    <div>
                       <h3 className="mb-4 text-sm font-medium text-[var(--muted)] uppercase tracking-wide">Editor</h3>
                       <label className="mb-4 block text-sm">
                         Auto-save interval (seconds)
@@ -550,6 +587,28 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, iconOnly
                         />
                         <span className="mt-1 block text-xs text-[var(--muted)]">
                           Path relative to the docs folder, e.g. <code>home.md</code> or <code>team/dashboard.md</code>. Leave blank to show the empty dashboard.
+                        </span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={openDailyNote}
+                          onChange={(e) => setOpenDailyNote(e.target.checked)}
+                          className="rounded border-[var(--border)]"
+                        />
+                        Open today&apos;s daily note on startup
+                        <span className="text-xs text-[var(--muted)]">(overrides start page when enabled)</span>
+                      </label>
+                      <label className="block text-sm">
+                        Quick capture folder
+                        <input
+                          value={captureFolder}
+                          onChange={(e) => setCaptureFolder(e.target.value)}
+                          placeholder="inbox"
+                          className="mt-1.5 w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
+                        />
+                        <span className="mt-1 block text-xs text-[var(--muted)]">
+                          Folder for quick-capture notes (relative to docs), e.g. <code>inbox</code>
                         </span>
                       </label>
                       {error && <p className="text-sm text-red-600">{error}</p>}

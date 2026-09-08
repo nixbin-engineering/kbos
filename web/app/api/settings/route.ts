@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadSettings, saveAISettings, saveSecuritySettings, saveUISettings } from "@/lib/settings";
+import { loadSettings, saveAISettings, saveSecuritySettings, saveUISettings, saveVaultName } from "@/lib/settings";
 import { isAuthError, requireAuth } from "@/lib/require-auth";
 
 export async function GET(req: NextRequest) {
@@ -17,7 +17,21 @@ export async function PUT(req: NextRequest) {
 
   const body = await req.json();
 
-  if (body?.ui?.autosave_seconds !== undefined || body?.ui?.attachments_subdir !== undefined || body?.ui?.start_page !== undefined) {
+  if (body?.vault?.name !== undefined) {
+    try {
+      await saveVaultName(String(body.vault.name));
+    } catch (e) {
+      return NextResponse.json({ error: String(e) }, { status: 400 });
+    }
+  }
+
+  if (
+    body?.ui?.autosave_seconds !== undefined ||
+    body?.ui?.attachments_subdir !== undefined ||
+    body?.ui?.start_page !== undefined ||
+    body?.ui?.open_daily_note !== undefined ||
+    body?.ui?.capture_folder !== undefined
+  ) {
     const current = await loadSettings();
     const secs =
       body?.ui?.autosave_seconds !== undefined ? Number(body.ui.autosave_seconds) : current.ui.autosave_seconds;
@@ -34,6 +48,14 @@ export async function PUT(req: NextRequest) {
         body?.ui?.start_page !== undefined
           ? String(body.ui.start_page)
           : current.ui.start_page,
+      open_daily_note:
+        body?.ui?.open_daily_note !== undefined
+          ? Boolean(body.ui.open_daily_note)
+          : current.ui.open_daily_note,
+      capture_folder:
+        body?.ui?.capture_folder !== undefined
+          ? String(body.ui.capture_folder)
+          : current.ui.capture_folder,
     });
   }
 

@@ -39,7 +39,7 @@ type Config struct {
 
 func defaultConfig() Config {
 	var c Config
-	c.Vault.Name = "default"
+	c.Vault.Name = "Vault"
 	c.Paths.Docs = "docs"
 	c.Paths.Templates = "templates"
 	c.Paths.Assets = "assets"

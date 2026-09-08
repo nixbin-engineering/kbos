@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, FileText, Folder } from "lucide-react";
+import { ChevronRight, FileText, Folder, Lock } from "lucide-react";
 import type { FolderIndex, FolderIndexEntry } from "@/lib/types";
 
 type Props = {
@@ -58,7 +58,14 @@ function EntryGroup({
               className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-[var(--border)]"
             >
               {e.type === "dir" ? (
-                <Folder className="mt-0.5 h-4 w-4 shrink-0 opacity-70" />
+                <span className="relative mt-0.5 shrink-0">
+                  <Folder className="h-4 w-4 opacity-70" />
+                  {e.hasEncrypted && (
+                    <Lock className="absolute -bottom-1 -right-1 h-3 w-3 text-amber-600 dark:text-amber-400" aria-label="Contains encrypted notes" />
+                  )}
+                </span>
+              ) : e.encrypted ? (
+                <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Encrypted note" />
               ) : (
                 <FileText className="mt-0.5 h-4 w-4 shrink-0 opacity-70" />
               )}

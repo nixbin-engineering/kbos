@@ -21,6 +21,7 @@ type Props = {
   onOpenDoc?: (path: string) => void;
   onOpenDocNewTab?: (path: string) => void;
   onOpenDocInSplit?: (path: string) => void;
+  isAdmin?: boolean;
 };
 
 export function VaultContextMenu({
@@ -32,9 +33,10 @@ export function VaultContextMenu({
   onOpenDoc,
   onOpenDocNewTab,
   onOpenDocInSplit,
+  isAdmin = false,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
-  const [dialog, setDialog] = useState<"encrypt" | "decrypt" | "delete" | "rename" | null>(null);
+  const [dialog, setDialog] = useState<"encrypt" | "decrypt" | "delete" | "rename" | "rename-vault" | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
   const [renameTo, setRenameTo] = useState("");
@@ -173,6 +175,28 @@ export function VaultContextMenu({
     }
   };
 
+  const runRenameVault = async () => {
+    if (!renameTo.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vault: { name: renameTo.trim() } }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      onTreeRefresh();
+      setDialog(null);
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runRename = async () => {
     if (!renameTo.trim() || target.itemType === "root") return;
     setBusy(true);
@@ -256,6 +280,20 @@ export function VaultContextMenu({
             }}
           />
         )}
+        {target.itemType === "root" && isAdmin && (
+          <>
+            <div className="my-1 border-t border-[var(--border)]" />
+            <MenuBtn
+              icon={Pencil}
+              label="Rename vault…"
+              onClick={() => {
+                setRenameTo(target.itemName);
+                setDialog("rename-vault");
+                setError(null);
+              }}
+            />
+          </>
+        )}
         {target.itemType !== "root" && (
           <>
             <div className="my-1 border-t border-[var(--border)]" />
@@ -290,11 +328,16 @@ export function VaultContextMenu({
             <h2 className="mb-2 font-semibold">
               {dialog === "encrypt" && (isFolder ? "Encrypt folder" : "Encrypt note")}
               {dialog === "decrypt" && (isFolder ? "Decrypt folder" : "Decrypt note")}
+              {dialog === "rename-vault" && "Rename vault"}
               {dialog === "rename" && `Rename ${target.itemType === "file" ? "note" : "folder"}`}
               {dialog === "delete" && `Delete ${target.itemType === "file" ? "note" : "folder"}`}
             </h2>
             <p className="mb-3 text-sm text-[var(--muted)]">
-              {target.itemPath ? `docs/${target.itemPath}` : "docs/"}
+              {dialog === "rename-vault"
+                ? "Display name for this vault in the sidebar (stored in config/kb.yaml)."
+                : target.itemPath
+                  ? `docs/${target.itemPath}`
+                  : "docs/"}
             </p>
             {dialog === "encrypt" && (
               <div className="mb-3 flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
@@ -335,14 +378,16 @@ export function VaultContextMenu({
                 )}
               </>
             )}
-            {dialog === "rename" && (
+            {(dialog === "rename" || dialog === "rename-vault") && (
               <label className="mb-3 block text-sm">
-                New name
+                {dialog === "rename-vault" ? "Vault name" : "New name"}
                 <input
                   type="text"
                   value={renameTo}
                   onChange={(e) => setRenameTo(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void runRename()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void (dialog === "rename-vault" ? runRenameVault() : runRename());
+                  }}
                   className="mt-1 w-full rounded-md border border-[var(--border)] bg-transparent px-3 py-2"
                   autoFocus
                 />
@@ -364,10 +409,11 @@ export function VaultContextMenu({
               </button>
               <button
                 type="button"
-                disabled={busy || (dialog === "rename" ? !renameTo.trim() : dialog !== "delete" && !passphrase)}
+                disabled={busy || (dialog === "rename" || dialog === "rename-vault" ? !renameTo.trim() : dialog !== "delete" && !passphrase)}
                 onClick={() => {
                   if (dialog === "encrypt") void runEncrypt();
                   else if (dialog === "decrypt") void runDecrypt();
+                  else if (dialog === "rename-vault") void runRenameVault();
                   else if (dialog === "rename") void runRename();
                   else void runDelete();
                 }}
@@ -378,7 +424,7 @@ export function VaultContextMenu({
                     : "bg-[var(--accent)] text-[var(--accent-fg)]",
                 )}
               >
-                {busy ? "Working…" : dialog === "delete" ? "Delete" : dialog === "encrypt" ? "Encrypt" : dialog === "rename" ? "Rename" : "Decrypt"}
+                {busy ? "Working…" : dialog === "delete" ? "Delete" : dialog === "encrypt" ? "Encrypt" : dialog === "rename-vault" ? "Save" : dialog === "rename" ? "Rename" : "Decrypt"}
               </button>
             </div>
           </div>

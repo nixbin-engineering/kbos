@@ -3,7 +3,10 @@ export type TreeNode = {
   path: string;
   type: "file" | "dir";
   children?: TreeNode[];
+  /** Encrypted note file (.md.enc). */
   encrypted?: boolean;
+  /** Folder contains one or more encrypted notes (in this tree or subfolders). */
+  hasEncrypted?: boolean;
 };
 
 export type DocMeta = {
@@ -43,6 +46,8 @@ export type FolderIndexEntry = {
   title: string;
   type: "file" | "dir";
   snippet?: string;
+  encrypted?: boolean;
+  hasEncrypted?: boolean;
 };
 
 export type FolderIndex = {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Bookmark, BookOpen, Bot, CheckSquare, FilePlus, GitBranch, KeyRound, Link2, Menu, RefreshCw, Settings, Wrench } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, Bot, CheckSquare, FilePlus, GitBranch, KeyRound, LayoutDashboard, Link2, Menu, RefreshCw, Settings, Wrench } from "lucide-react";
 import type { Tab, TreeNode } from "@/lib/types";
 import { useVaultEvents } from "@/lib/use-vault-events";
 import { createLocalFile, forgetLocalFileHandle, newLocalFileId, openLocalFile, registerLocalFileHandle } from "@/lib/local-file";
@@ -31,6 +31,7 @@ import { VaultSwitcher } from "./vault-switcher";
 import { PasswordManager } from "./password-manager";
 import { DashboardView } from "./dashboard-view";
 import { HelpButton } from "./help-panel";
+import type { HelpTopic } from "@/lib/help-content";
 
 type Phase = "loading" | "setup" | "login" | "app";
 
@@ -46,7 +47,11 @@ function findFileInTree(tree: TreeNode | null, relPath: string): boolean {
   return walk(tree.children);
 }
 
-export function KbosShell() {
+type KbosShellProps = {
+  helpTopics: HelpTopic[];
+};
+
+export function KbosShell({ helpTopics }: KbosShellProps) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [user, setUser] = useState<string | null>(null);
   const [userRole, setUserRole] = useState("guest");
@@ -108,13 +113,14 @@ export function KbosShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);       // mobile overlay
   const [desktopSidebar, setDesktopSidebar] = useState(true);  // desktop persistent
-  const [appView, setAppView] = useState<"notes" | "tasks" | "bookmarks" | "passwords" | "tools">("notes");
+  const [appView, setAppView] = useState<"notes" | "tasks" | "dashboard" | "passwords" | "tools">("notes");
   const [templatePick, setTemplatePick] = useState<{ path: string } | null>(null);
   const [templateName, setTemplateName] = useState("");
   const [templateBusy, setTemplateBusy] = useState(false);
 
   const initialNavDone = useRef(false);
   const startPageRef = useRef("home.md");
+  const openDailyNoteRef = useRef(false);
 
   // Navigation history (per active tab — stored alongside tab state via refs)
   type NavEntry = { path: string | null; folderView: string | null };
@@ -148,15 +154,17 @@ export function KbosShell() {
   const loadTree = useCallback(async () => {
     setError(null);
     try {
-      const health = await fetch("/api/health");
-      if (!health.ok) {
-        setReady(false);
-        setError("Vault initializing… retry in a few seconds.");
-        return;
-      }
+      // Hit /api/tree directly — do not preflight /api/health.
+      // Global NPM WAF blocks URLs ending in /health, which made the UI
+      // think the vault was uninitialized while other APIs worked fine.
       const r = await fetch("/api/tree");
       if (r.status === 401) {
         setPhase("login");
+        return;
+      }
+      if (r.status === 503) {
+        setReady(false);
+        setError("Vault initializing… retry in a few seconds.");
         return;
       }
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
@@ -171,16 +179,29 @@ export function KbosShell() {
           if (sr.ok) {
             const s = await sr.json();
             if (s?.ui?.autosave_seconds) setAutosaveSeconds(s.ui.autosave_seconds);
-            if (s?.ui?.start_page) { setStartPage(s.ui.start_page); startPageRef.current = s.ui.start_page; }
+            if (s?.ui?.start_page !== undefined) { setStartPage(s.ui.start_page); startPageRef.current = s.ui.start_page; }
+            if (s?.ui?.open_daily_note) openDailyNoteRef.current = true;
           }
         } catch { /* ignore */ }
-        // Check for ?doc= deep link first, fall back to configured start page
+        // Check for ?doc= deep link first, fall back to daily note or configured start page
         const docParam = typeof window !== "undefined"
           ? new URLSearchParams(window.location.search).get("doc")
           : null;
         if (docParam && findFileInTree(treeData, docParam)) {
           setTabs((prev) => prev.map((t, i) => i === 0 ? { ...t, path: docParam } : t));
           window.history.replaceState({}, "", window.location.pathname);
+        } else if (openDailyNoteRef.current) {
+          try {
+            const jr = await fetch("/api/journal", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ period: "daily" }),
+            });
+            const data = await jr.json();
+            if (jr.ok && data.path) {
+              setTabs((prev) => prev.map((t, i) => i === 0 ? { ...t, path: data.path } : t));
+            }
+          } catch { /* ignore */ }
         } else {
           const sp = startPageRef.current;
           if (sp && findFileInTree(treeData, sp)) {
@@ -200,6 +221,15 @@ export function KbosShell() {
       if (ok) loadTree();
     });
   }, [checkAuth, loadTree]);
+
+  // Auto-retry when the vault truly isn't ready yet (503 from /api/tree).
+  useEffect(() => {
+    if (error !== "Vault initializing… retry in a few seconds.") return;
+    const t = window.setTimeout(() => {
+      void loadTree();
+    }, 3000);
+    return () => window.clearTimeout(t);
+  }, [error, loadTree]);
 
   useEffect(() => {
     if (phase !== "app") return;
@@ -252,6 +282,21 @@ export function KbosShell() {
     setAppView("notes");
     setSidebarOpen(false);
   }, []);
+
+  const quickCapture = useCallback(async () => {
+    try {
+      const r = await fetch("/api/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await r.json();
+      if (r.ok && data.path) {
+        openDoc(data.path);
+        loadTree();
+      }
+    } catch { /* ignore */ }
+  }, [openDoc, loadTree]);
 
   const openDocInSplit = useCallback((path: string) => {
     setSplitPath(path);
@@ -567,7 +612,7 @@ export function KbosShell() {
             {([
               ["notes", BookOpen, "Notes"],
               ["tasks", CheckSquare, "Tasks"],
-              ["bookmarks", Bookmark, "Bookmarks"],
+              ["dashboard", LayoutDashboard, "Dashboard"],
               ["passwords", KeyRound, "Passwords"],
               ["tools", Wrench, "Dev Tools"],
             ] as const).map(([view, Icon, label]) => (
@@ -637,12 +682,13 @@ export function KbosShell() {
                   role={userRole}
                   autosaveSeconds={autosaveSeconds}
                   onUpdated={setAutosaveSeconds}
+                  onVaultRenamed={loadTree}
                   iconOnly
                 />
               </span>
             </Tooltip>
           )}
-          <HelpButton />
+          <HelpButton topics={helpTopics} />
           <UserMenu user={user} onLogout={logout} />
         </div>
       </header>
@@ -692,6 +738,7 @@ export function KbosShell() {
             onOpenDoc={openDoc}
             onOpenDocNewTab={openDocNewTab}
             onOpenDocInSplit={openDocInSplit}
+            isAdmin={userRole === "admin"}
           />
         </aside>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--background)]">
@@ -699,7 +746,7 @@ export function KbosShell() {
             <DevToolsPanel />
           ) : appView === "passwords" ? (
             <PasswordManager />
-          ) : appView === "bookmarks" ? (
+          ) : appView === "dashboard" ? (
             <BookmarksManager />
           ) : appView === "tasks" ? (
             <TasksManager />
@@ -714,7 +761,8 @@ export function KbosShell() {
                 const data = await r.json();
                 if (r.ok && data.path) openDoc(data.path);
               }}
-              onOpenBookmarks={() => setAppView("bookmarks")}
+              onQuickCapture={() => void quickCapture()}
+              onOpenDashboard={() => setAppView("dashboard")}
               onOpenTasks={() => setAppView("tasks")}
             />
           ) : (
@@ -794,6 +842,7 @@ export function KbosShell() {
             const data = await r.json();
             if (r.ok && data.path) openDoc(data.path);
           }}
+          onQuickCapture={() => { void quickCapture(); }}
           onOpenLocalFile={() => void openLocalFileTab()}
           onNewLocalFile={() => void newLocalFileTab()}
           onNewFromTemplate={(tplPath) => {
@@ -839,7 +888,7 @@ export function KbosShell() {
         {([
           ["notes", BookOpen, "Notes"],
           ["tasks", CheckSquare, "Tasks"],
-          ["bookmarks", Bookmark, "Bookmarks"],
+          ["dashboard", LayoutDashboard, "Dashboard"],
           ["passwords", KeyRound, "Passwords"],
         ] as const).map(([view, Icon, label]) => (
           <button

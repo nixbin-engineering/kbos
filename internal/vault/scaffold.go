@@ -11,6 +11,7 @@ var scaffoldDirs = []string{
 	"docs/projects",
 	"docs/research",
 	"docs/journal",
+	"docs/inbox",
 	"docs/archive",
 	"templates/daily",
 	"templates/weekly",

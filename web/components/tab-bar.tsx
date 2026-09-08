@@ -1,8 +1,8 @@
 "use client";
 
-import { Columns2, FileText, Folder, HardDrive, Home, PanelLeftClose, Plus, X } from "lucide-react";
+import { Columns2, FileText, Folder, HardDrive, Home, Lock, PanelLeftClose, Plus, X } from "lucide-react";
 import type { Tab } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, isEncryptedNotePath } from "@/lib/utils";
 
 type Props = {
   tabs: Tab[];
@@ -51,7 +51,9 @@ export function TabBar({ tabs, activeIdx, splitEnabled, onActivate, onClose, onN
                   ? tab.folderView === ""
                     ? <Home className="h-3.5 w-3.5 shrink-0 opacity-60" />
                     : <Folder className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                  : <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                  : tab.path && isEncryptedNotePath(tab.path)
+                    ? <Lock className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Encrypted note" />
+                    : <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
               }
               <span className="max-w-[120px] truncate">{tabLabel(tab)}</span>
               <button

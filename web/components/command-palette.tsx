@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Folder, HardDrive, Hash, LayoutTemplate, Search, Zap } from "lucide-react";
+import { FileText, Folder, HardDrive, Hash, Inbox, LayoutTemplate, Lock, Search, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isLocalFileSupported } from "@/lib/local-file";
 import type { SearchHit, TemplateEntry, TreeNode } from "@/lib/types";
@@ -23,6 +23,7 @@ type Props = {
   onOpenGraph: () => void;
   onOpenAiChat: () => void;
   onOpenJournal: () => void;
+  onQuickCapture?: () => void;
   onNewFromTemplate?: (templatePath: string) => void;
   onOpenLocalFile?: () => void;
   onNewLocalFile?: () => void;
@@ -55,6 +56,7 @@ export function CommandPalette({
   onOpenGraph,
   onOpenAiChat,
   onOpenJournal,
+  onQuickCapture,
   onNewFromTemplate,
   onOpenLocalFile,
   onNewLocalFile,
@@ -95,6 +97,15 @@ export function CommandPalette({
       icon: <FileText className="h-4 w-4" />,
       onSelect: () => { onOpenJournal(); onClose(); },
     },
+    ...(onQuickCapture
+      ? [{
+          id: "capture",
+          label: "Quick capture",
+          description: "New note in inbox",
+          icon: <Inbox className="h-4 w-4" />,
+          onSelect: () => { onQuickCapture(); onClose(); },
+        }]
+      : []),
     ...(onOpenLocalFile && isLocalFileSupported()
       ? [
           {
@@ -127,7 +138,11 @@ export function CommandPalette({
       id: `file:${n.path}`,
       label: labelForPath(n.path),
       description: n.path,
-      icon: <FileText className="h-4 w-4 opacity-60" />,
+      icon: n.encrypted ? (
+        <Lock className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+      ) : (
+        <FileText className="h-4 w-4 opacity-60" />
+      ),
       onSelect: () => { onOpenDoc(n.path); onClose(); },
     }));
 
@@ -137,7 +152,14 @@ export function CommandPalette({
       id: `dir:${n.path}`,
       label: n.name,
       description: n.path + "/",
-      icon: <Folder className="h-4 w-4 opacity-60" />,
+      icon: n.hasEncrypted ? (
+        <span className="relative inline-flex">
+          <Folder className="h-4 w-4 opacity-60" />
+          <Lock className="absolute -bottom-1 -right-1 h-2.5 w-2.5 text-amber-600 dark:text-amber-400" />
+        </span>
+      ) : (
+        <Folder className="h-4 w-4 opacity-60" />
+      ),
       onSelect: () => { onOpenFolder(n.path); onClose(); },
     }));
 

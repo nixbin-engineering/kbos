@@ -1,8 +1,8 @@
 "use client";
 
-import { ChevronDown, ChevronRight, FileText, Folder, Lock, Pin } from "lucide-react";
+import { BookOpen, ChevronDown, ChevronRight, FileText, Folder, Lock, Pin } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { cn } from "@/lib/utils";
+import { cn, isEncryptedNotePath } from "@/lib/utils";
 import type { TreeNode } from "@/lib/types";
 import { VaultItemActions } from "./vault-item-actions";
 import { VaultContextMenu, type ContextTarget } from "./vault-context-menu";
@@ -19,6 +19,7 @@ type Props = {
   onOpenDoc?: (path: string) => void;
   onOpenDocNewTab?: (path: string) => void;
   onOpenDocInSplit?: (path: string) => void;
+  isAdmin?: boolean;
 };
 
 export function VaultTree({
@@ -33,12 +34,14 @@ export function VaultTree({
   onOpenDoc,
   onOpenDocNewTab,
   onOpenDocInSplit,
+  isAdmin = false,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{
     target: ContextTarget;
     position: { x: number; y: number };
   } | null>(null);
   const [pins, setPins] = useState<string[]>([]);
+  const [rootOpen, setRootOpen] = useState(true);
 
   useEffect(() => {
     fetch("/api/pins").then((r) => r.ok ? r.json() : { pins: [] }).then((d) => setPins(d.pins ?? [])).catch(() => {});
@@ -60,6 +63,8 @@ export function VaultTree({
     return <p className="min-h-0 flex-1 p-3 text-sm text-[var(--muted)]">Loading vault…</p>;
   }
   const rootActive = folderView === "" && !selected;
+  const rootHasEncrypted = treeHasEncrypted(tree);
+
   return (
     <>
       <nav className="flex min-h-0 flex-1 flex-col overflow-hidden p-2 text-sm">
@@ -71,17 +76,23 @@ export function VaultTree({
             {pins.map((pinPath) => {
               const label = pinPath.split("/").pop()?.replace(/\.md(\.enc)?$/, "") ?? pinPath;
               const active = selected === pinPath;
+              const encrypted = isEncryptedNotePath(pinPath);
               return (
                 <div
                   key={pinPath}
                   className={cn(
                     "group flex items-center gap-0.5 rounded-md hover:bg-[var(--border)]",
                     active && "bg-[var(--accent)] text-[var(--accent-fg)] hover:bg-[var(--accent)]",
+                    encrypted && !active && "text-amber-600 dark:text-amber-400",
                   )}
                   style={{ paddingLeft: "8px" }}
                 >
                   <button type="button" onClick={() => onSelect(pinPath)} className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left">
-                    <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                    {encrypted ? (
+                      <Lock className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Encrypted note" />
+                    ) : (
+                      <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                    )}
                     <span className="truncate">{label}</span>
                   </button>
                   <button
@@ -98,54 +109,63 @@ export function VaultTree({
             <div className="mt-2 border-t border-[var(--border)]" />
           </div>
         )}
-        <div
-          className={cn(
-            "group mb-1 flex items-center gap-1 rounded-md px-2 py-1 hover:bg-[var(--border)]",
-            rootActive && "bg-[var(--accent)]/15 ring-1 ring-[var(--accent)]",
-          )}
-          onContextMenu={(e) =>
-            openContext(e, { itemType: "root", itemPath: "", itemName: tree.name, parentPath: "" })
-          }
-        >
-          <button
-            type="button"
-            onClick={() => onSelectFolder("")}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            className={cn(
+              "group flex items-center gap-0.5 rounded-md hover:bg-[var(--border)]",
+              rootActive && "bg-[var(--accent)]/15 ring-1 ring-[var(--accent)]",
+            )}
+            style={{ paddingLeft: "4px" }}
+            onContextMenu={(e) =>
+              openContext(e, { itemType: "root", itemPath: "", itemName: tree.name, parentPath: "" })
+            }
           >
-            <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" />
-            <span className="truncate font-medium">{tree.name}</span>
-            {tree && (
+            <button type="button" onClick={() => setRootOpen(!rootOpen)} className="flex shrink-0 items-center py-1">
+              {rootOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectFolder("")}
+              className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
+            >
+              <BookOpen className="h-3.5 w-3.5 shrink-0 text-[var(--accent)] opacity-90" />
+              <span className="truncate font-medium">{tree.name}</span>
+              {rootHasEncrypted && (
+                <Lock className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Contains encrypted notes" />
+              )}
               <span className="ml-1 shrink-0 rounded px-1 text-[10px] text-[var(--muted)] opacity-60">
                 {countFiles(tree)}
               </span>
-            )}
-          </button>
-          <VaultItemActions
-            parentPath=""
-            itemType="root"
-            onCreated={onCreated}
-            onTreeRefresh={onTreeRefresh}
-          />
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {(tree.children || []).map((node) => (
-            <TreeBranch
-              key={node.path || node.name}
-              node={node}
-              selected={selected}
-              folderView={folderView}
-              onSelect={onSelect}
-              onSelectFolder={onSelectFolder}
+            </button>
+            <VaultItemActions
+              parentPath=""
+              itemType="root"
               onCreated={onCreated}
-              onDeleted={onDeleted}
               onTreeRefresh={onTreeRefresh}
-              onContextMenu={openContext}
-              onOpenDocNewTab={onOpenDocNewTab}
-              depth={0}
-              pins={pins}
-              onTogglePin={togglePin}
             />
-          ))}
+          </div>
+          {rootOpen && (
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {(tree.children || []).map((node) => (
+                <TreeBranch
+                  key={node.path || node.name}
+                  node={node}
+                  selected={selected}
+                  folderView={folderView}
+                  onSelect={onSelect}
+                  onSelectFolder={onSelectFolder}
+                  onCreated={onCreated}
+                  onDeleted={onDeleted}
+                  onTreeRefresh={onTreeRefresh}
+                  onContextMenu={openContext}
+                  onOpenDocNewTab={onOpenDocNewTab}
+                  depth={1}
+                  pins={pins}
+                  onTogglePin={togglePin}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </nav>
       <VaultContextMenu
@@ -157,6 +177,7 @@ export function VaultTree({
         onOpenDoc={onOpenDoc}
         onOpenDocNewTab={onOpenDocNewTab}
         onOpenDocInSplit={onOpenDocInSplit}
+        isAdmin={isAdmin}
       />
     </>
   );
@@ -165,6 +186,11 @@ export function VaultTree({
 function countFiles(node: TreeNode): number {
   if (node.type === "file") return 1;
   return (node.children ?? []).reduce((s, c) => s + countFiles(c), 0);
+}
+
+function treeHasEncrypted(node: TreeNode): boolean {
+  if (node.encrypted || node.hasEncrypted) return true;
+  return (node.children ?? []).some(treeHasEncrypted);
 }
 
 function TreeBranch({
@@ -230,7 +256,7 @@ function TreeBranch({
           className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
         >
           {node.encrypted ? (
-            <Lock className="h-3.5 w-3.5 shrink-0 opacity-80" />
+            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Encrypted note" />
           ) : (
             <FileText className={cn("h-3.5 w-3.5 shrink-0 opacity-70", isIndex && "text-[var(--accent)]")} />
           )}
@@ -265,6 +291,7 @@ function TreeBranch({
   const folderActive = folderView === node.path && !selected;
   const hasIndex = (node.children || []).some((c) => c.type === "file" && (c.name === "index.md" || c.name === "index.md.enc"));
   const fileCount = countFiles(node);
+  const hasEncrypted = node.hasEncrypted;
 
   return (
     <div>
@@ -293,6 +320,9 @@ function TreeBranch({
         >
           <Folder className={cn("h-3.5 w-3.5 shrink-0", hasIndex ? "fill-[var(--accent)]/30 text-[var(--accent)] opacity-80" : "opacity-70")} />
           <span className="truncate font-medium">{node.name}</span>
+          {hasEncrypted && (
+            <Lock className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" aria-label="Contains encrypted notes" />
+          )}
           {fileCount > 0 && (
             <span className="ml-1 shrink-0 rounded px-1 text-[10px] text-[var(--muted)] opacity-60">
               {fileCount}

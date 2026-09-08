@@ -47,6 +47,78 @@ function bodyFromRaw(raw: string): string {
   return matter(raw).content;
 }
 
+function DocEmptyState({
+  onOpenDoc,
+}: {
+  tree?: TreeNode | null;
+  onOpenDoc: (path: string) => void;
+}) {
+  const [recentFiles, setRecentFiles] = useState<{ path: string; title: string; folder: string }[]>([]);
+
+  useEffect(() => {
+    fetch("/api/recent?limit=8")
+      .then((r) => (r.ok ? r.json() : { recent: [] }))
+      .then((d) => setRecentFiles(d.recent ?? []))
+      .catch(() => undefined);
+  }, []);
+
+  return (
+    <div className="flex flex-1 items-center justify-center p-8 overflow-y-auto">
+      <div className="w-full max-w-lg">
+        <div className="mb-6 flex flex-col items-center text-center">
+          <div className="mb-3 rounded-full bg-[var(--accent)]/10 p-4">
+            <BookOpen className="h-8 w-8 text-[var(--accent)] opacity-60" />
+          </div>
+          <h2 className="text-lg font-semibold">Your knowledge base</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            Select a note from the sidebar, or use the quick actions below.
+          </p>
+        </div>
+
+        {recentFiles.length > 0 && (
+          <div className="mb-5">
+            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]">Recent notes</p>
+            <div className="rounded-md border border-[var(--border)] divide-y divide-[var(--border)]">
+              {recentFiles.map((f) => (
+                <button
+                  key={f.path}
+                  onClick={() => onOpenDoc(f.path)}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-[var(--border)] transition-colors"
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--muted)]" />
+                  <span className="truncate font-medium">{f.title}</span>
+                  {f.folder && (
+                    <span className="ml-auto shrink-0 text-[11px] text-[var(--muted)]">{f.folder}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]">Quick actions</p>
+          <div className="rounded-md border border-[var(--border)] divide-y divide-[var(--border)] text-sm">
+            <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
+              <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px]">⌘K</kbd>
+              <span>Open command palette</span>
+            </div>
+            <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
+              <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px]">⌘⇧A</kbd>
+              <span>Ask AI assistant</span>
+            </div>
+            <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
+              <span className="text-xs">Hover a folder in the sidebar →</span>
+              <span className="font-mono text-[10px] bg-[var(--border)] px-1 rounded">+</span>
+              <span className="text-xs">to create a note</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const TASK_MARKER_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]/gm;
 
 // Flips the `taskIndex`-th (0-based, document order) `- [ ]`/`- [x]` marker in
@@ -455,76 +527,7 @@ export function DocWorkspace({
   );
 
   if (!path) {
-    // Collect up to 8 recent files from tree (flat walk, alphabetical as proxy)
-    const recentFiles: { path: string; name: string; folder: string }[] = [];
-    const walkForRecent = (nodes: TreeNode[], folderLabel: string) => {
-      for (const n of nodes) {
-        if (recentFiles.length >= 8) return;
-        if (n.type === "file" && n.path?.endsWith(".md") && !n.path.endsWith(".md.enc")) {
-          const name = n.name.replace(/\.md$/, "");
-          recentFiles.push({ path: n.path, name, folder: folderLabel });
-        } else if (n.type === "dir" && n.children) {
-          walkForRecent(n.children, n.name);
-        }
-      }
-    };
-    if (tree?.children) walkForRecent(tree.children, "");
-
-    return (
-      <div className="flex flex-1 items-center justify-center p-8 overflow-y-auto">
-        <div className="w-full max-w-lg">
-          <div className="mb-6 flex flex-col items-center text-center">
-            <div className="mb-3 rounded-full bg-[var(--accent)]/10 p-4">
-              <BookOpen className="h-8 w-8 text-[var(--accent)] opacity-60" />
-            </div>
-            <h2 className="text-lg font-semibold">Your knowledge base</h2>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              Select a note from the sidebar, or use the quick actions below.
-            </p>
-          </div>
-
-          {recentFiles.length > 0 && (
-            <div className="mb-5">
-              <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]">Notes</p>
-              <div className="rounded-md border border-[var(--border)] divide-y divide-[var(--border)]">
-                {recentFiles.map((f) => (
-                  <button
-                    key={f.path}
-                    onClick={() => onOpenDoc(f.path)}
-                    className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-[var(--border)] transition-colors"
-                  >
-                    <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--muted)]" />
-                    <span className="truncate font-medium">{f.name}</span>
-                    {f.folder && (
-                      <span className="ml-auto shrink-0 text-[11px] text-[var(--muted)]">{f.folder}</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div>
-            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]">Quick actions</p>
-            <div className="rounded-md border border-[var(--border)] divide-y divide-[var(--border)] text-sm">
-              <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
-                <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px]">⌘K</kbd>
-                <span>Open command palette</span>
-              </div>
-              <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
-                <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px]">⌘⇧A</kbd>
-                <span>Ask AI assistant</span>
-              </div>
-              <div className="flex items-center gap-3 px-3 py-2 text-[var(--muted)]">
-                <span className="text-xs">Hover a folder in the sidebar →</span>
-                <span className="font-mono text-[10px] bg-[var(--border)] px-1 rounded">+</span>
-                <span className="text-xs">to create a note</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+    return <DocEmptyState tree={tree} onOpenDoc={onOpenDoc} />;
   }
 
   if (loading) {

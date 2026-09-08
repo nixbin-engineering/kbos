@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  findBookmark,
   flattenVisibleBookmarks,
   loadDashboards,
   saveDashboards,
@@ -15,21 +14,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const { id } = await params;
   const body = await req.json();
   const all = await loadDashboards();
-  const found = findBookmark(all, id);
-  if (!found) return NextResponse.json({ error: "not found" }, { status: 404 });
+  const idx = all.findIndex((d) => d.id === id);
+  if (idx === -1) return NextResponse.json({ error: "not found" }, { status: 404 });
 
-  const bm = found.bookmark;
-  if (bm.owner !== auth.user && auth.role !== "admin") {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (typeof body.name === "string" && body.name.trim()) {
+    all[idx] = { ...all[idx], name: body.name.trim() };
   }
-
-  all[found.dashboardIdx].bookmarks[found.bookmarkIdx] = {
-    ...bm,
-    ...body,
-    id,
-    owner: bm.owner,
-    createdAt: bm.createdAt,
-  };
   await saveDashboards(all);
 
   const dashboards = visibleDashboards(all, auth.user || "");
@@ -42,14 +32,14 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
 
   const { id } = await params;
   const all = await loadDashboards();
-  const found = findBookmark(all, id);
-  if (!found) return NextResponse.json({ error: "not found" }, { status: 404 });
-
-  if (found.bookmark.owner !== auth.user && auth.role !== "admin") {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (all.length <= 1) {
+    return NextResponse.json({ error: "cannot delete the last dashboard" }, { status: 400 });
   }
 
-  all[found.dashboardIdx].bookmarks = all[found.dashboardIdx].bookmarks.filter((b) => b.id !== id);
+  const idx = all.findIndex((d) => d.id === id);
+  if (idx === -1) return NextResponse.json({ error: "not found" }, { status: 404 });
+
+  all.splice(idx, 1);
   await saveDashboards(all);
 
   const dashboards = visibleDashboards(all, auth.user || "");

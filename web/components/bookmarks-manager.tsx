@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
-  BookmarkPlus,
+  LayoutDashboard,
   Trash2,
   ExternalLink,
   Tag,
@@ -10,9 +10,12 @@ import {
   Edit2,
   X,
   Check,
+  Plus,
 } from "lucide-react";
 
-export const BOOKMARKS_NAV_ID = "bookmarks";
+export const DASHBOARD_NAV_ID = "dashboard";
+/** @deprecated use DASHBOARD_NAV_ID */
+export const BOOKMARKS_NAV_ID = DASHBOARD_NAV_ID;
 
 type Bookmark = {
   id: string;
@@ -22,6 +25,14 @@ type Bookmark = {
   tags?: string[];
   createdAt: string;
 };
+
+type Dashboard = {
+  id: string;
+  name: string;
+  bookmarks: Bookmark[];
+};
+
+const ACTIVE_DASHBOARD_KEY = "kbos-active-dashboard-id";
 
 function getDomain(url: string): string {
   try {
@@ -39,50 +50,72 @@ function parseTags(raw: string): string[] {
 }
 
 export function BookmarksManager() {
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [dashboards, setDashboards] = useState<Dashboard[]>([]);
+  const [activeDashboardId, setActiveDashboardId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Add form state
+  const [showAddForm, setShowAddForm] = useState(false);
   const [addUrl, setAddUrl] = useState("");
   const [addTitle, setAddTitle] = useState("");
   const [addDesc, setAddDesc] = useState("");
   const [addTags, setAddTags] = useState("");
   const [adding, setAdding] = useState(false);
 
-  // Search / filter
   const [search, setSearch] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
 
-  // Edit state: id -> draft fields
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editTags, setEditTags] = useState("");
 
-  // Delete confirmation
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [renamingDashboardId, setRenamingDashboardId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [creatingDashboard, setCreatingDashboard] = useState(false);
 
-  const fetchBookmarks = useCallback(async () => {
+  const activeDashboard =
+    dashboards.find((d) => d.id === activeDashboardId) ?? dashboards[0] ?? null;
+  const bookmarks = activeDashboard?.bookmarks ?? [];
+
+  const applyDashboards = useCallback((next: Dashboard[]) => {
+    setDashboards(next);
+    setActiveDashboardId((cur) => {
+      if (cur && next.some((d) => d.id === cur)) return cur;
+      const stored =
+        typeof window !== "undefined" ? localStorage.getItem(ACTIVE_DASHBOARD_KEY) : null;
+      if (stored && next.some((d) => d.id === stored)) return stored;
+      return next[0]?.id ?? null;
+    });
+  }, []);
+
+  const fetchDashboards = useCallback(async () => {
     try {
       const res = await fetch("/api/bookmarks");
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setBookmarks(data.bookmarks ?? []);
+      applyDashboards(data.dashboards ?? []);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyDashboards]);
 
   useEffect(() => {
-    fetchBookmarks();
-  }, [fetchBookmarks]);
+    fetchDashboards();
+  }, [fetchDashboards]);
+
+  useEffect(() => {
+    if (activeDashboardId) {
+      localStorage.setItem(ACTIVE_DASHBOARD_KEY, activeDashboardId);
+    }
+  }, [activeDashboardId]);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
-    if (!addUrl.trim()) return;
+    if (!addUrl.trim() || !activeDashboard) return;
     const title = addTitle.trim() || getDomain(addUrl.trim());
     setAdding(true);
     try {
@@ -94,15 +127,17 @@ export function BookmarksManager() {
           title,
           description: addDesc.trim() || undefined,
           tags: parseTags(addTags),
+          dashboardId: activeDashboard.id,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setBookmarks(data.bookmarks);
+      applyDashboards(data.dashboards ?? []);
       setAddUrl("");
       setAddTitle("");
       setAddDesc("");
       setAddTags("");
+      setShowAddForm(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -115,7 +150,7 @@ export function BookmarksManager() {
       const res = await fetch(`/api/bookmarks/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setBookmarks(data.bookmarks);
+      applyDashboards(data.dashboards ?? []);
       setConfirmDeleteId(null);
     } catch (e) {
       setError(String(e));
@@ -142,19 +177,67 @@ export function BookmarksManager() {
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setBookmarks(data.bookmarks);
+      applyDashboards(data.dashboards ?? []);
       setEditingId(null);
     } catch (e) {
       setError(String(e));
     }
   }
 
-  // Unique tags across all bookmarks
-  const allTags = Array.from(
-    new Set(bookmarks.flatMap((b) => b.tags ?? []))
-  ).sort();
+  async function handleCreateDashboard() {
+    const name = window.prompt("Dashboard name", "New dashboard");
+    if (!name?.trim()) return;
+    setCreatingDashboard(true);
+    try {
+      const res = await fetch("/api/bookmarks/dashboards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      applyDashboards(data.dashboards ?? []);
+      const created = (data.dashboards as Dashboard[]).find((d) => d.name === name.trim());
+      if (created) setActiveDashboardId(created.id);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCreatingDashboard(false);
+    }
+  }
 
-  // Filtered bookmarks
+  async function handleRenameDashboard(id: string) {
+    const name = renameDraft.trim();
+    if (!name) return;
+    try {
+      const res = await fetch(`/api/bookmarks/dashboards/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      applyDashboards(data.dashboards ?? []);
+      setRenamingDashboardId(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDeleteDashboard(id: string) {
+    if (!window.confirm("Delete this dashboard and all its links?")) return;
+    try {
+      const res = await fetch(`/api/bookmarks/dashboards/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      applyDashboards(data.dashboards ?? []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  const allTags = Array.from(new Set(bookmarks.flatMap((b) => b.tags ?? []))).sort();
+
   const filtered = bookmarks.filter((b) => {
     if (activeTag && !(b.tags ?? []).includes(activeTag)) return false;
     if (!search.trim()) return true;
@@ -169,15 +252,101 @@ export function BookmarksManager() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      {/* Header */}
-      <div className="flex items-center gap-2">
-        <BookmarkPlus size={22} style={{ color: "var(--accent)" }} />
-        <h1 className="text-xl font-semibold" style={{ color: "var(--foreground)" }}>
-          Bookmarks
-        </h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <LayoutDashboard size={22} style={{ color: "var(--accent)" }} />
+          <h1 className="text-xl font-semibold" style={{ color: "var(--foreground)" }}>
+            Dashboard
+          </h1>
+        </div>
+        <div className="flex items-center gap-2">
+          {!showAddForm && (
+            <button
+              type="button"
+              onClick={() => setShowAddForm(true)}
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium"
+              style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
+            >
+              <Plus size={14} />
+              Add link
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleCreateDashboard}
+            disabled={creatingDashboard}
+            className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm disabled:opacity-50"
+            style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            title="New dashboard"
+          >
+            <Plus size={14} />
+            Dashboard
+          </button>
+        </div>
       </div>
 
-      {/* Error */}
+      {dashboards.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {dashboards.map((d) => {
+            const active = d.id === (activeDashboard?.id ?? null);
+            const isRenaming = renamingDashboardId === d.id;
+            return (
+              <div key={d.id} className="flex items-center gap-1">
+                {isRenaming ? (
+                  <>
+                    <input
+                      value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      className="rounded-md border px-2 py-1 text-sm"
+                      style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void handleRenameDashboard(d.id);
+                        if (e.key === "Escape") setRenamingDashboardId(null);
+                      }}
+                    />
+                    <button type="button" onClick={() => handleRenameDashboard(d.id)}>
+                      <Check size={14} />
+                    </button>
+                    <button type="button" onClick={() => setRenamingDashboardId(null)}>
+                      <X size={14} />
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveDashboardId(d.id)}
+                    onDoubleClick={() => {
+                      setRenamingDashboardId(d.id);
+                      setRenameDraft(d.name);
+                    }}
+                    className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
+                    style={
+                      active
+                        ? { background: "var(--accent)", color: "var(--accent-fg)" }
+                        : { background: "var(--border)", color: "var(--foreground)" }
+                    }
+                    title="Double-click to rename"
+                  >
+                    {d.name}
+                  </button>
+                )}
+                {active && dashboards.length > 1 && !isRenaming && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteDashboard(d.id)}
+                    className="rounded p-1 opacity-50 hover:opacity-100"
+                    title="Delete dashboard"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {error && (
         <div
           className="rounded-md px-4 py-2 text-sm"
@@ -190,81 +359,71 @@ export function BookmarksManager() {
         </div>
       )}
 
-      {/* Add form */}
-      <form
-        onSubmit={handleAdd}
-        className="rounded-lg p-4 flex flex-col gap-3"
-        style={{ border: "1px solid var(--border)", background: "var(--panel)" }}
-      >
-        <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
-          Add Bookmark
-        </p>
-        <div className="flex flex-col sm:flex-row gap-2">
-          <input
-            type="url"
-            placeholder="URL *"
-            value={addUrl}
-            onChange={(e) => setAddUrl(e.target.value)}
-            required
-            className="flex-1 rounded-md border px-3 py-2 text-sm"
-            style={{
-              borderColor: "var(--border)",
-              background: "transparent",
-              color: "var(--foreground)",
-            }}
-          />
-          <input
-            type="text"
-            placeholder="Title (optional — uses domain if blank)"
-            value={addTitle}
-            onChange={(e) => setAddTitle(e.target.value)}
-            className="flex-1 rounded-md border px-3 py-2 text-sm"
-            style={{
-              borderColor: "var(--border)",
-              background: "transparent",
-              color: "var(--foreground)",
-            }}
-          />
-        </div>
-        <div className="flex flex-col sm:flex-row gap-2">
-          <input
-            type="text"
-            placeholder="Description (optional)"
-            value={addDesc}
-            onChange={(e) => setAddDesc(e.target.value)}
-            className="flex-1 rounded-md border px-3 py-2 text-sm"
-            style={{
-              borderColor: "var(--border)",
-              background: "transparent",
-              color: "var(--foreground)",
-            }}
-          />
-          <input
-            type="text"
-            placeholder="Tags (comma separated)"
-            value={addTags}
-            onChange={(e) => setAddTags(e.target.value)}
-            className="flex-1 rounded-md border px-3 py-2 text-sm"
-            style={{
-              borderColor: "var(--border)",
-              background: "transparent",
-              color: "var(--foreground)",
-            }}
-          />
-        </div>
-        <div>
-          <button
-            type="submit"
-            disabled={adding}
-            className="rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
-            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-          >
-            {adding ? "Adding…" : "Add"}
-          </button>
-        </div>
-      </form>
+      {showAddForm && (
+        <form
+          onSubmit={handleAdd}
+          className="rounded-lg p-4 flex flex-col gap-3"
+          style={{ border: "1px solid var(--border)", background: "var(--panel)" }}
+        >
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
+              Add link
+            </p>
+            <button type="button" onClick={() => setShowAddForm(false)} className="opacity-60 hover:opacity-100">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="url"
+              placeholder="URL *"
+              value={addUrl}
+              onChange={(e) => setAddUrl(e.target.value)}
+              required
+              autoFocus
+              className="flex-1 rounded-md border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
+            />
+            <input
+              type="text"
+              placeholder="Title (optional — uses domain if blank)"
+              value={addTitle}
+              onChange={(e) => setAddTitle(e.target.value)}
+              className="flex-1 rounded-md border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
+            />
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              placeholder="Description (optional)"
+              value={addDesc}
+              onChange={(e) => setAddDesc(e.target.value)}
+              className="flex-1 rounded-md border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
+            />
+            <input
+              type="text"
+              placeholder="Tags (comma separated)"
+              value={addTags}
+              onChange={(e) => setAddTags(e.target.value)}
+              className="flex-1 rounded-md border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
+            />
+          </div>
+          <div>
+            <button
+              type="submit"
+              disabled={adding}
+              className="rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
+              style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
+            >
+              {adding ? "Adding…" : "Add"}
+            </button>
+          </div>
+        </form>
+      )}
 
-      {/* Search */}
       <div
         className="flex items-center gap-2 rounded-md border px-3 py-2"
         style={{ borderColor: "var(--border)", background: "var(--panel)" }}
@@ -272,7 +431,7 @@ export function BookmarksManager() {
         <Search size={15} style={{ color: "var(--muted)" }} />
         <input
           type="text"
-          placeholder="Search bookmarks…"
+          placeholder="Search links…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="flex-1 bg-transparent text-sm outline-none"
@@ -285,7 +444,6 @@ export function BookmarksManager() {
         )}
       </div>
 
-      {/* Tag filter chips */}
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-2 items-center">
           <Tag size={13} style={{ color: "var(--muted)" }} />
@@ -304,29 +462,24 @@ export function BookmarksManager() {
             </button>
           ))}
           {activeTag && (
-            <button
-              className="text-xs underline"
-              style={{ color: "var(--muted)" }}
-              onClick={() => setActiveTag(null)}
-            >
+            <button className="text-xs underline" style={{ color: "var(--muted)" }} onClick={() => setActiveTag(null)}>
               clear
             </button>
           )}
         </div>
       )}
 
-      {/* Grid */}
       {loading ? (
         <p className="text-sm" style={{ color: "var(--muted)" }}>
           Loading…
         </p>
       ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-20" style={{ color: "var(--muted)" }}>
-          <BookmarkPlus size={40} />
+          <LayoutDashboard size={40} />
           <p className="text-sm">
             {bookmarks.length === 0
-              ? "No bookmarks yet. Add one above!"
-              : "No bookmarks match your search."}
+              ? "No links yet. Click Add link to get started."
+              : "No links match your search."}
           </p>
         </div>
       ) : (
@@ -340,12 +493,8 @@ export function BookmarksManager() {
               <div
                 key={b.id}
                 className="rounded-lg p-4 shadow-sm flex flex-col gap-2"
-                style={{
-                  border: "1px solid var(--border)",
-                  background: "var(--panel)",
-                }}
+                style={{ border: "1px solid var(--border)", background: "var(--panel)" }}
               >
-                {/* Title row */}
                 <div className="flex items-start gap-2">
                   <img
                     src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
@@ -360,11 +509,7 @@ export function BookmarksManager() {
                       value={editTitle}
                       onChange={(e) => setEditTitle(e.target.value)}
                       className="flex-1 rounded-md border px-2 py-1 text-sm"
-                      style={{
-                        borderColor: "var(--border)",
-                        background: "transparent",
-                        color: "var(--foreground)",
-                      }}
+                      style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
                     />
                   ) : (
                     <a
@@ -380,16 +525,10 @@ export function BookmarksManager() {
                   )}
                 </div>
 
-                {/* URL */}
-                <p
-                  className="text-xs truncate"
-                  style={{ color: "var(--muted)" }}
-                  title={b.url}
-                >
+                <p className="text-xs truncate" style={{ color: "var(--muted)" }} title={b.url}>
                   {b.url}
                 </p>
 
-                {/* Description */}
                 {isEditing ? (
                   <input
                     type="text"
@@ -397,11 +536,7 @@ export function BookmarksManager() {
                     value={editDesc}
                     onChange={(e) => setEditDesc(e.target.value)}
                     className="rounded-md border px-2 py-1 text-sm"
-                    style={{
-                      borderColor: "var(--border)",
-                      background: "transparent",
-                      color: "var(--foreground)",
-                    }}
+                    style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
                   />
                 ) : (
                   b.description && (
@@ -411,7 +546,6 @@ export function BookmarksManager() {
                   )
                 )}
 
-                {/* Tags */}
                 {isEditing ? (
                   <input
                     type="text"
@@ -419,11 +553,7 @@ export function BookmarksManager() {
                     value={editTags}
                     onChange={(e) => setEditTags(e.target.value)}
                     className="rounded-md border px-2 py-1 text-sm"
-                    style={{
-                      borderColor: "var(--border)",
-                      background: "transparent",
-                      color: "var(--foreground)",
-                    }}
+                    style={{ borderColor: "var(--border)", background: "transparent", color: "var(--foreground)" }}
                   />
                 ) : (
                   (b.tags ?? []).length > 0 && (
@@ -446,7 +576,6 @@ export function BookmarksManager() {
                   )
                 )}
 
-                {/* Actions */}
                 <div className="flex items-center gap-2 mt-auto pt-2">
                   {isEditing ? (
                     <>
@@ -461,11 +590,7 @@ export function BookmarksManager() {
                       <button
                         onClick={() => setEditingId(null)}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
-                        style={{
-                          border: "1px solid var(--border)",
-                          color: "var(--foreground)",
-                          background: "transparent",
-                        }}
+                        style={{ border: "1px solid var(--border)", color: "var(--foreground)", background: "transparent" }}
                       >
                         <X size={12} />
                         Cancel
@@ -486,11 +611,7 @@ export function BookmarksManager() {
                       <button
                         onClick={() => setConfirmDeleteId(null)}
                         className="rounded-md px-2 py-1 text-xs"
-                        style={{
-                          border: "1px solid var(--border)",
-                          color: "var(--foreground)",
-                          background: "transparent",
-                        }}
+                        style={{ border: "1px solid var(--border)", color: "var(--foreground)", background: "transparent" }}
                       >
                         No
                       </button>
@@ -500,11 +621,7 @@ export function BookmarksManager() {
                       <button
                         onClick={() => startEdit(b)}
                         className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
-                        style={{
-                          border: "1px solid var(--border)",
-                          color: "var(--foreground)",
-                          background: "transparent",
-                        }}
+                        style={{ border: "1px solid var(--border)", color: "var(--foreground)", background: "transparent" }}
                       >
                         <Edit2 size={12} />
                         Edit
@@ -512,11 +629,7 @@ export function BookmarksManager() {
                       <button
                         onClick={() => setConfirmDeleteId(b.id)}
                         className="flex items-center gap-1 text-xs rounded-md px-2 py-1 ml-auto"
-                        style={{
-                          border: "1px solid var(--border)",
-                          color: "var(--muted)",
-                          background: "transparent",
-                        }}
+                        style={{ border: "1px solid var(--border)", color: "var(--muted)", background: "transparent" }}
                       >
                         <Trash2 size={12} />
                       </button>

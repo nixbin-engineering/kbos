@@ -5,6 +5,7 @@ import matter from "gray-matter";
 import type { DocMeta, DocResponse, FolderIndex, FolderIndexEntry, SearchHit, TemplateEntry, TreeNode } from "./types";
 import { kbDecryptToMemory } from "./kb-runner";
 import { mergeTags } from "./tags";
+import { isEncryptedNotePath } from "./utils";
 
 const VAULT_PATH = process.env.VAULT_PATH || "/vault";
 
@@ -25,9 +26,7 @@ export function vaultRoot(): string {
   return path.resolve(VAULT_PATH);
 }
 
-export function isEncryptedNotePath(rel: string): boolean {
-  return rel.endsWith(".md.enc");
-}
+export { isEncryptedNotePath } from "./utils";
 
 export function encryptedNotePath(rel: string): string {
   if (isEncryptedNotePath(rel)) return rel;
@@ -96,7 +95,8 @@ async function buildTree(absDir: string, rel: string, hideDir?: string, rootName
     }
   }
 
-  return { name, path: rel || "", type: "dir", children };
+  const hasEncrypted = children.some((c) => c.encrypted || c.hasEncrypted);
+  return { name, path: rel || "", type: "dir", children, ...(hasEncrypted ? { hasEncrypted: true } : {}) };
 }
 
 export class EncryptedDocError extends Error {
@@ -275,6 +275,20 @@ export async function getFolderIndex(folderRel: string): Promise<FolderIndex> {
   return { folder, folderTitle, indexPath: indexDoc ? indexRel : null, indexDoc, entries };
 }
 
+async function dirHasEncrypted(absDir: string): Promise<boolean> {
+  let entries;
+  try {
+    entries = await fs.readdir(absDir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (e.isFile() && e.name.endsWith(".md.enc")) return true;
+    if (e.isDirectory() && (await dirHasEncrypted(path.join(absDir, e.name)))) return true;
+  }
+  return false;
+}
+
 async function listFolderEntries(dirPath: string, folderRel: string): Promise<FolderIndexEntry[]> {
   let entries;
   try {
@@ -285,17 +299,37 @@ async function listFolderEntries(dirPath: string, folderRel: string): Promise<Fo
 
   const out: FolderIndexEntry[] = [];
   const dirs = entries.filter((e) => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
-  const files = entries
-    .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== "index.md")
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const files = entries.filter((e) => e.isFile()).sort((a, b) => a.name.localeCompare(b.name));
+  const fileNames = new Set(files.map((f) => f.name));
 
   for (const d of dirs) {
     const childRel = folderRel ? `${folderRel}/${d.name}` : d.name;
-    out.push({ path: childRel, name: d.name, title: d.name, type: "dir" });
+    const hasEncrypted = await dirHasEncrypted(path.join(dirPath, d.name));
+    out.push({
+      path: childRel,
+      name: d.name,
+      title: d.name,
+      type: "dir",
+      ...(hasEncrypted ? { hasEncrypted: true } : {}),
+    });
   }
 
   for (const f of files) {
     const childRel = folderRel ? `${folderRel}/${f.name}` : f.name;
+    if (f.name.endsWith(".md.enc")) {
+      const display = f.name.replace(/\.enc$/, "");
+      out.push({
+        path: childRel,
+        name: display,
+        title: display.replace(/\.md$/, ""),
+        type: "file",
+        encrypted: true,
+      });
+      continue;
+    }
+    if (!f.name.endsWith(".md") || f.name === "index.md" || fileNames.has(`${f.name}.enc`)) {
+      continue;
+    }
     let title = f.name.replace(/\.md$/, "");
     let snippet: string | undefined;
     try {
@@ -305,7 +339,7 @@ async function listFolderEntries(dirPath: string, folderRel: string): Promise<Fo
     } catch {
       /* ignore */
     }
-    out.push({ path: childRel, name: f.name, title, type: "file", snippet });
+    out.push({ path: childRel, name: f.name, title, type: "file", snippet, encrypted: false });
   }
 
   return out;
@@ -497,6 +531,63 @@ async function walkMd(dir: string, rel: string, fn: (rel: string, raw: string) =
 
 export async function walkPlainDocs(fn: (rel: string, raw: string) => Promise<void>): Promise<void> {
   await walkMd(docsDir(), "", fn);
+}
+
+export type RecentDoc = {
+  path: string;
+  title: string;
+  folder: string;
+  modifiedAt: string;
+};
+
+async function walkNoteMtimes(
+  dir: string,
+  rel: string,
+  out: Map<string, number>
+): Promise<void> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue;
+    const abs = path.join(dir, e.name);
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      await walkNoteMtimes(abs, childRel, out);
+    } else if (e.isFile() && (e.name.endsWith(".md") || e.name.endsWith(".md.enc"))) {
+      const stat = await fs.stat(abs);
+      const noteRel = e.name.endsWith(".md.enc")
+        ? childRel.replace(/\.enc$/, "").replace(/\\/g, "/")
+        : childRel.replace(/\\/g, "/");
+      const prev = out.get(noteRel);
+      if (!prev || stat.mtimeMs > prev) out.set(noteRel, stat.mtimeMs);
+    }
+  }
+}
+
+export async function listRecentDocs(limit = 12): Promise<RecentDoc[]> {
+  const mtimes = new Map<string, number>();
+  await walkNoteMtimes(docsDir(), "", mtimes);
+  const sorted = [...mtimes.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+
+  const results: RecentDoc[] = [];
+  for (const [rel, mtime] of sorted) {
+    const folder = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    let title = path.basename(rel, ".md").replace(/-/g, " ");
+    try {
+      const doc = await readDoc(rel);
+      if (doc.meta.title) title = doc.meta.title;
+    } catch {
+      /* encrypted or unreadable — use filename */
+    }
+    results.push({
+      path: rel,
+      title,
+      folder,
+      modifiedAt: new Date(mtime).toISOString(),
+    });
+  }
+  return results;
 }
 
 /**
