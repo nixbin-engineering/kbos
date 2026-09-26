@@ -80,35 +80,76 @@ export async function embedText(settings: AISettings, text: string): Promise<num
   if (!embedModel) throw new Error("No embedding model configured");
 
   const baseUrl = resolveEmbedBaseUrl(settings);
-  const res = await fetch(`${baseUrl}/embeddings`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${resolveApiKey()}`,
-    },
-    body: JSON.stringify({ model: embedModel, input: text }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(errText || `Embedding request failed (${res.status})`);
+  const target = `${baseUrl}/embeddings`;
+  let res: Response;
+  try {
+    res = await fetch(target, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${resolveApiKey()}`,
+      },
+      body: JSON.stringify({ model: embedModel, input: text }),
+    });
+  } catch (e) {
+    throw new Error(
+      `Cannot reach ${target} from the KBOS container (${String(e)}). ` +
+        `Bind the embed server to 0.0.0.0 and use http://host.docker.internal:<port>/v1.`,
+    );
   }
 
-  const data = await res.json() as { data?: { embedding: number[] }[]; embedding?: number[] };
+  const textBody = await res.text();
+  if (!res.ok) {
+    throw new Error(textBody.slice(0, 300) || `Embedding request failed (${res.status})`);
+  }
+  if (textBody.trim().startsWith("<!") || textBody.trim().startsWith("<html")) {
+    throw new Error(`${target} returned HTML instead of JSON — wrong port/path for embeddings API.`);
+  }
+  let data: { data?: { embedding: number[] }[]; embedding?: number[] };
+  try {
+    data = JSON.parse(textBody) as { data?: { embedding: number[] }[]; embedding?: number[] };
+  } catch {
+    throw new Error(`Invalid JSON from ${target}: ${textBody.slice(0, 120)}`);
+  }
   // OpenAI format: data[0].embedding; some providers return embedding directly
-  const embedding = data.data?.[0]?.embedding ?? (data as { embedding?: number[] }).embedding;
+  const embedding = data.data?.[0]?.embedding ?? data.embedding;
   if (!Array.isArray(embedding)) throw new Error("Unexpected embedding response shape");
   return embedding;
 }
 
 export async function fetchModels(baseUrl: string): Promise<string[]> {
   const url = baseUrl.replace(/\/$/, "");
-  const res = await fetch(`${url}/models`, {
-    headers: { Authorization: `Bearer ${resolveApiKey()}` },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`Failed to fetch models (${res.status})`);
-  const data = await res.json() as { data?: { id: string }[]; models?: { name: string }[] };
+  const target = `${url}/models`;
+  let res: Response;
+  try {
+    res = await fetch(target, {
+      headers: { Authorization: `Bearer ${resolveApiKey()}` },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (e) {
+    throw new Error(
+      `Cannot reach ${target} from the KBOS container (${String(e)}). ` +
+        `If the LLM runs on the Mac host, it must listen on 0.0.0.0 (not only 127.0.0.1), ` +
+        `and base URL should be http://host.docker.internal:<port>/v1.`,
+    );
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Failed to fetch models (${res.status}) from ${target}: ${text.slice(0, 200)}`);
+  }
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<!") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML")) {
+    throw new Error(
+      `${target} returned HTML instead of JSON — that port is serving a web page, not an OpenAI-compatible /v1 API. ` +
+        `Check the MLX/Ollama listen port and path (expected GET …/v1/models → JSON).`,
+    );
+  }
+  let data: { data?: { id: string }[]; models?: { name: string }[] };
+  try {
+    data = JSON.parse(trimmed) as { data?: { id: string }[]; models?: { name: string }[] };
+  } catch {
+    throw new Error(`Invalid JSON from ${target}: ${trimmed.slice(0, 120)}`);
+  }
   // OpenAI format
   if (Array.isArray(data.data)) return data.data.map((m) => m.id).sort();
   // Ollama /api/tags format (some versions)

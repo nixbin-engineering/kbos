@@ -19,6 +19,8 @@ type AiStatus = {
   connected: boolean;
   model: string;
   status_message: string;
+  active_profile?: string;
+  profiles?: { id: string; name: string }[];
 };
 
 type Props = {
@@ -91,12 +93,48 @@ export function AiChatPanel({
 
   const loadStatus = useCallback(async () => {
     try {
-      const r = await fetch("/api/ai/status");
-      if (r.ok) setStatus(await r.json());
+      const [statusRes, settingsRes] = await Promise.all([
+        fetch("/api/ai/status"),
+        fetch("/api/settings"),
+      ]);
+      let profiles: { id: string; name: string }[] = [];
+      let active_profile: string | undefined;
+      if (settingsRes.ok) {
+        const s = await settingsRes.json();
+        profiles = (s.ai?.profiles || []).map((p: { id: string; name: string }) => ({
+          id: p.id,
+          name: p.name,
+        }));
+        active_profile = s.ai?.active_profile;
+      }
+      if (statusRes.ok) {
+        const st = await statusRes.json();
+        setStatus({ ...st, profiles, active_profile });
+      } else {
+        setStatus(null);
+      }
     } catch {
       setStatus(null);
     }
   }, []);
+
+  const switchProfile = async (profileId: string) => {
+    if (!profileId || profileId === status?.active_profile) return;
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ai: { active_profile: profileId } }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || r.statusText);
+      }
+      await loadStatus();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   useEffect(() => {
     if (open) loadStatus();
@@ -276,6 +314,18 @@ export function AiChatPanel({
                 : status.status_message
               : "Disabled — enable in admin settings"}
           </p>
+          {status?.enabled && status.profiles && status.profiles.length > 1 && (
+            <select
+              value={status.active_profile || ""}
+              onChange={(e) => void switchProfile(e.target.value)}
+              className="mt-1 max-w-full rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 text-[10px]"
+              title="Switch AI profile"
+            >
+              {status.profiles.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
         </div>
         <button type="button" onClick={onClose} className="rounded p-1 hover:bg-[var(--border)]" title="Close">
           <X className="h-4 w-4" />

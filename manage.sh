@@ -36,7 +36,7 @@ QUICK START
 After changing application code:
 
   ./manage.sh build       Rebuild Docker images
-  ./manage.sh restart     Restart web service
+  ./manage.sh restart     Recreate web container (picks up newly built image)
 
 
 COMMANDS
@@ -82,6 +82,10 @@ COMMANDS
                           Rotate secret-like keys in .env (or only the ones named)
                           Backs up .env first; does not restart anything
   deploy:release          On the prod server: git pull --ff-only, pull the new image, up -d
+
+  sync:up                 Start optional Syncthing sibling (docker-compose.sync.yml)
+  sync:down               Stop Syncthing only (KBOS keeps running)
+                          See docs/vault-sync.md for laptop↔server vault sync
 
   help | -h | --help      Show this help
 
@@ -156,6 +160,7 @@ EXAMPLES
   ./manage.sh docker:build --prod --patch
   ./manage.sh docker:push --prod --minor
   ./manage.sh deploy:release   # run on the prod server
+  ./manage.sh sync:up          # optional Syncthing for laptop↔server vault sync
 
 
 ARCHITECTURE
@@ -480,6 +485,29 @@ cmd_deploy_release() {
   dc ps
 }
 
+cmd_sync_up() {
+  load_env
+  ensure_vault_dir
+  local cfg="${SYNCTHING_CONFIG:-./.syncthing}"
+  mkdir -p "$cfg"
+  if [[ -f vault/.stignore.example && ! -f "${VAULT_PATH}/.stignore" ]]; then
+    cp vault/.stignore.example "${VAULT_PATH}/.stignore"
+    green "Installed ${VAULT_PATH}/.stignore from vault/.stignore.example"
+  fi
+  bold "Starting Syncthing sibling (shares VAULT_PATH=${VAULT_PATH})…"
+  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml up -d syncthing
+  green "Syncthing UI: http://localhost:${SYNCTHING_UI_PORT:-8384}"
+  bold "In the UI, add shared folder path /vault and pair the other host. See docs/vault-sync.md"
+}
+
+cmd_sync_down() {
+  load_env
+  bold "Stopping Syncthing sibling (KBOS unchanged)…"
+  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml stop syncthing "$@" || true
+  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml rm -f syncthing "$@" || true
+  green "Syncthing stopped."
+}
+
 main() {
   # Global help flags (./manage.sh --help, ./manage.sh -h, ./manage.sh)
   if [[ $# -eq 0 ]] || [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -496,7 +524,7 @@ main() {
     up) cmd_up "$@" ;;
     start) cmd_start "$@" ;;
     down|stop) load_env && dc down "$@" ;;
-    restart) load_env && dc restart web "$@" ;;
+    restart) load_env && dc up -d --force-recreate --no-deps web "$@" ;;
     logs) load_env && dc logs -f web "$@" ;;
     shell) cmd_shell "$@" ;;
     open|url) cmd_open ;;
@@ -544,6 +572,8 @@ main() {
     docker:push)    cmd_docker_push "$@" ;;
     secrets:rotate) cmd_secrets_rotate "$@" ;;
     deploy:release) cmd_deploy_release ;;
+    sync:up) cmd_sync_up ;;
+    sync:down) cmd_sync_down "$@" ;;
     *)
       red "Unknown command: $cmd"
       usage

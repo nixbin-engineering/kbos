@@ -25,6 +25,10 @@ services:
     #  - "${KBOS_PORT:-3000}:3000"
     networks:
       - proxy
+    # Reach host LLM/MLX (Ollama, etc.) via host.docker.internal — required on Linux;
+    # also reliable on Docker Desktop when using a custom/external network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       VAULT_PATH: /vault
       VAULTS_BASE: /vaults

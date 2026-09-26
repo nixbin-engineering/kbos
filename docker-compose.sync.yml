@@ -1,0 +1,24 @@
+# Optional Syncthing sibling — shares VAULT_PATH with KBOS.
+# Does not start with default ./manage.sh start; use:
+#   ./manage.sh sync:up
+#   docker compose --env-file .env -f docker-compose.yml -f docker-compose.sync.yml up -d
+#
+# Open http://localhost:${SYNCTHING_UI_PORT:-8384} and share folder path /vault
+# (apply vault/.stignore.example). See docs/vault-sync.md.
+
+services:
+  syncthing:
+    image: syncthing/syncthing:1.29
+    container_name: kbos-syncthing
+    hostname: kbos-syncthing
+    environment:
+      PUID: ${DOCKER_UID:-1000}
+      PGID: ${DOCKER_GID:-1000}
+    volumes:
+      - ${SYNCTHING_CONFIG:-./.syncthing}:/var/syncthing
+      - ${VAULT_PATH:-./vault}:/vault
+    ports:
+      - "${SYNCTHING_UI_PORT:-8384}:8384"
+      - "${SYNCTHING_SYNC_PORT:-22000}:22000/tcp"
+      - "${SYNCTHING_SYNC_PORT:-22000}:22000/udp"
+    restart: unless-stopped

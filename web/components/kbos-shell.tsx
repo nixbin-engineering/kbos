@@ -70,6 +70,8 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
   const leftScrollRef = useRef<HTMLDivElement | null>(null);
   const rightScrollRef = useRef<HTMLDivElement | null>(null);
   const scrollSyncing = useRef(false);
+  const editorDirtyRef = useRef(false);
+  const editorSaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [tagQuery, setTagQuery] = useState<string | null>(null);
 
   const selected = tabs[activeTabIdx]?.path ?? null;
@@ -257,6 +259,52 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
     },
   });
 
+  const onEditorDirtyChange = useCallback((dirty: boolean) => {
+    editorDirtyRef.current = dirty;
+  }, []);
+
+  const onRegisterEditorSave = useCallback((save: (() => Promise<boolean>) | null) => {
+    editorSaveRef.current = save;
+  }, []);
+
+  const [leaveDialog, setLeaveDialog] = useState<{ open: boolean; saving: boolean; error: string | null }>({
+    open: false,
+    saving: false,
+    error: null,
+  });
+  const leaveResolverRef = useRef<((ok: boolean) => void) | null>(null);
+
+  const resolveLeaveDialog = useCallback((ok: boolean) => {
+    leaveResolverRef.current?.(ok);
+    leaveResolverRef.current = null;
+    setLeaveDialog({ open: false, saving: false, error: null });
+  }, []);
+
+  /** Prompt when leaving a dirty editor. Resolves true after save, false if cancelled. */
+  const confirmLeave = useCallback((): Promise<boolean> => {
+    if (!editorDirtyRef.current) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      leaveResolverRef.current = resolve;
+      setLeaveDialog({ open: true, saving: false, error: null });
+    });
+  }, []);
+
+  const saveAndLeave = useCallback(async () => {
+    setLeaveDialog((d) => ({ ...d, saving: true, error: null }));
+    const save = editorSaveRef.current;
+    if (!save) {
+      setLeaveDialog((d) => ({ ...d, saving: false, error: "Editor is not ready to save." }));
+      return;
+    }
+    const saved = await save();
+    if (!saved) {
+      setLeaveDialog((d) => ({ ...d, saving: false, error: "Could not save. Try again." }));
+      return;
+    }
+    editorDirtyRef.current = false;
+    resolveLeaveDialog(true);
+  }, [resolveLeaveDialog]);
+
   const pushNav = useCallback((entry: NavEntry) => {
     navHistory.current = navHistory.current.slice(0, navIdx.current + 1);
     navHistory.current.push(entry);
@@ -268,20 +316,24 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
     setTabs((prev) => prev.map((t, i) => i === activeTabIdx ? { ...t, ...update } : t));
   }, [activeTabIdx]);
 
-  const openDoc = useCallback((path: string) => {
+  const openDoc = useCallback(async (path: string) => {
+    if (path !== selected || appView !== "notes") {
+      if (!(await confirmLeave())) return;
+    }
     setActiveTab({ path, folderView: null });
     setAppView("notes");
     pushNav({ path, folderView: null });
     setSidebarOpen(false);
-  }, [setActiveTab, pushNav]);
+  }, [setActiveTab, pushNav, confirmLeave, selected, appView]);
 
-  const openDocNewTab = useCallback((path: string) => {
+  const openDocNewTab = useCallback(async (path: string) => {
+    if (!(await confirmLeave())) return;
     const id = `tab-${tabIdCounter.current++}`;
     setTabs((prev) => [...prev, { id, path, folderView: null }]);
     setActiveTabIdx((prev) => prev + 1); // will be the new last tab
     setAppView("notes");
     setSidebarOpen(false);
-  }, []);
+  }, [confirmLeave]);
 
   const quickCapture = useCallback(async () => {
     try {
@@ -292,7 +344,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
       });
       const data = await r.json();
       if (r.ok && data.path) {
-        openDoc(data.path);
+        await openDoc(data.path);
         loadTree();
       }
     } catch { /* ignore */ }
@@ -305,7 +357,8 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
   }, []);
 
   const openFolder = useCallback(
-    (folderPath: string) => {
+    async (folderPath: string) => {
+      if (!(await confirmLeave())) return;
       const indexPath = folderPath ? `${folderPath}/index.md` : "index.md";
       if (findFileInTree(tree, indexPath)) {
         setActiveTab({ path: indexPath, folderView: null });
@@ -315,26 +368,29 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
         pushNav({ path: null, folderView: folderPath });
       }
     },
-    [tree, setActiveTab, pushNav],
+    [tree, setActiveTab, pushNav, confirmLeave],
   );
 
-  const navBack = useCallback(() => {
+  const navBack = useCallback(async () => {
     if (navIdx.current <= 0) return;
+    if (!(await confirmLeave())) return;
     navIdx.current -= 1;
     const { path, folderView: f } = navHistory.current[navIdx.current];
     setActiveTab({ path, folderView: f });
     updateNavState();
-  }, [setActiveTab, updateNavState]);
+  }, [setActiveTab, updateNavState, confirmLeave]);
 
-  const navForward = useCallback(() => {
+  const navForward = useCallback(async () => {
     if (navIdx.current >= navHistory.current.length - 1) return;
+    if (!(await confirmLeave())) return;
     navIdx.current += 1;
     const { path, folderView: f } = navHistory.current[navIdx.current];
     setActiveTab({ path, folderView: f });
     updateNavState();
-  }, [setActiveTab, updateNavState]);
+  }, [setActiveTab, updateNavState, confirmLeave]);
 
-  const closeTab = useCallback((idx: number) => {
+  const closeTab = useCallback(async (idx: number) => {
+    if (idx === activeTabIdx && !(await confirmLeave())) return;
     setTabs((prev) => {
       const closedId = prev[idx]?.localFileId;
       if (closedId) void forgetLocalFileHandle(closedId);
@@ -346,15 +402,17 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
       if (idx === prev) return Math.max(0, prev - 1);
       return prev;
     });
-  }, []);
+  }, [activeTabIdx, confirmLeave]);
 
-  const newTab = useCallback(() => {
+  const newTab = useCallback(async () => {
+    if (!(await confirmLeave())) return;
     const id = `tab-${tabIdCounter.current++}`;
     setTabs((prev) => [...prev, { id, path: null, folderView: null }]);
     setActiveTabIdx((prev) => tabs.length); // new tab is at end
-  }, [tabs.length]);
+  }, [tabs.length, confirmLeave]);
 
   const openLocalFileTab = useCallback(async () => {
+    if (!(await confirmLeave())) return;
     const handle = await openLocalFile();
     if (!handle) return;
     const fileId = newLocalFileId();
@@ -364,9 +422,10 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
     setActiveTabIdx((prev) => prev + 1);
     setAppView("notes");
     setSidebarOpen(false);
-  }, []);
+  }, [confirmLeave]);
 
   const newLocalFileTab = useCallback(async () => {
+    if (!(await confirmLeave())) return;
     const handle = await createLocalFile();
     if (!handle) return;
     const fileId = newLocalFileId();
@@ -376,14 +435,24 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
     setActiveTabIdx((prev) => prev + 1);
     setAppView("notes");
     setSidebarOpen(false);
-  }, []);
+  }, [confirmLeave]);
 
-  const activateTab = useCallback((idx: number) => {
+  const activateTab = useCallback(async (idx: number) => {
+    if (idx === activeTabIdx) return;
+    if (!(await confirmLeave())) return;
     setActiveTabIdx(idx);
     navHistory.current = [];
     navIdx.current = -1;
     updateNavState();
-  }, [updateNavState]);
+  }, [updateNavState, activeTabIdx, confirmLeave]);
+
+  const switchAppView = useCallback(async (view: typeof appView) => {
+    if (view === appView) return;
+    if (appView === "notes" && view !== "notes") {
+      if (!(await confirmLeave())) return;
+    }
+    setAppView(view);
+  }, [appView, confirmLeave]);
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -459,7 +528,14 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
         ? (fp: string) => { setSplitFolderView(fp); setSplitPath(null); }
         : openFolder;
       if (opts?.localFileId) {
-        return <LocalFileWorkspace fileId={opts.localFileId} autosaveSeconds={autosaveSeconds} />;
+        return (
+          <LocalFileWorkspace
+            fileId={opts.localFileId}
+            autosaveSeconds={autosaveSeconds}
+            onDirtyChange={opts?.isSplit ? undefined : onEditorDirtyChange}
+            onRegisterSave={opts?.isSplit ? undefined : onRegisterEditorSave}
+          />
+        );
       }
       if (panePath?.endsWith(".pdf")) {
         return <PdfViewer filePath={panePath} fileName={panePath.split("/").pop()} />;
@@ -489,6 +565,8 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
           onOpenFolder={onOpenFld}
           onSaved={onDocumentSaved}
           onLiveTagsChange={opts?.isSplit ? undefined : setLiveDocTags}
+          onDirtyChange={opts?.isSplit ? undefined : onEditorDirtyChange}
+          onRegisterSave={opts?.isSplit ? undefined : onRegisterEditorSave}
           onAskAi={(prompt) =>
             openAiChat({ scope: panePath ? "document" : paneFolderView !== null ? "folder" : "vault", prompt })
           }
@@ -496,7 +574,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
         />
       );
     },
-    [openDoc, openDocInSplit, openFolder, tree, tagRefreshKey, autosaveSeconds, docRemoteRev, onDocumentSaved, createFolderIndex, openAiChat],
+    [openDoc, openDocInSplit, openFolder, tree, tagRefreshKey, autosaveSeconds, docRemoteRev, onDocumentSaved, createFolderIndex, openAiChat, onEditorDirtyChange, onRegisterEditorSave],
   );
 
   const toolbarBtn = () =>
@@ -619,7 +697,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
               <Tooltip key={view} content={label} side="bottom">
                 <button
                   type="button"
-                  onClick={() => setAppView(view)}
+                  onClick={() => void switchAppView(view)}
                   className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-150 ${
                     appView === view
                       ? "bg-[var(--accent)] text-[var(--accent-fg)] shadow-sm"
@@ -762,8 +840,8 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
                 if (r.ok && data.path) openDoc(data.path);
               }}
               onQuickCapture={() => void quickCapture()}
-              onOpenDashboard={() => setAppView("dashboard")}
-              onOpenTasks={() => setAppView("tasks")}
+              onOpenDashboard={() => void switchAppView("dashboard")}
+              onOpenTasks={() => void switchAppView("tasks")}
             />
           ) : (
             <>
@@ -880,6 +958,64 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
             </div>
           </div>
         )}
+
+        {/* Unsaved changes modal */}
+        {leaveDialog.open && (
+          <div
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="unsaved-leave-title"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget && !leaveDialog.saving) resolveLeaveDialog(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !leaveDialog.saving) {
+                e.preventDefault();
+                resolveLeaveDialog(false);
+              }
+            }}
+          >
+            <div
+              className="w-full max-w-sm rounded-lg border border-[var(--border)] bg-[var(--panel)] p-4 shadow-lg"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h2 id="unsaved-leave-title" className="mb-1 font-semibold">Unsaved changes</h2>
+              <p className="mb-4 text-sm text-[var(--muted)]">
+                This note has edits that haven&apos;t been saved yet. Save before leaving?
+              </p>
+              {leaveDialog.error && (
+                <p className="mb-3 text-sm text-red-600 dark:text-red-300">{leaveDialog.error}</p>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={leaveDialog.saving}
+                  onClick={() => resolveLeaveDialog(false)}
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--border)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  autoFocus
+                  disabled={leaveDialog.saving}
+                  onClick={() => void saveAndLeave()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+                >
+                  {leaveDialog.saving ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Saving…
+                    </>
+                  ) : (
+                    "Save and leave"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Mobile bottom navigation bar */}
@@ -894,7 +1030,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
           <button
             key={view}
             type="button"
-            onClick={() => setAppView(view)}
+            onClick={() => void switchAppView(view)}
             className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-medium transition-colors ${
               appView === view
                 ? "text-[var(--accent)]"

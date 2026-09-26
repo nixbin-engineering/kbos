@@ -1,0 +1,15 @@
+# Syncthing ignore rules for a KBOS vault (copy to .stignore)
+#
+#   cp vault/.stignore.example vault/.stignore
+#
+# Keeps disposable caches and VCS metadata out of laptop↔server sync.
+# See docs/vault-sync.md
+
+.kb
+(?d).kb/**
+.git
+(?d).git/**
+.DS_Store
+(?d)**/.DS_Store
+*.swp
+*~

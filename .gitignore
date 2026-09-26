@@ -3,7 +3,8 @@
 vault/*
 !vault/.gitkeep
 !vault/README.md
-
+!vault/.stignore.example
+.syncthing/
 # Go
 /bin/
 /dist/

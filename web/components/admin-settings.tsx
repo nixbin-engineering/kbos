@@ -4,7 +4,7 @@ import { Bot, BookOpen, Building2, ChevronDown, Database, Download, HardDrive, L
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
-import type { AISettings } from "@/lib/types";
+import type { AIProfile, AISettings } from "@/lib/types";
 import { applyTheme, THEMES, type ThemeId } from "@/lib/themes";
 import { useTheme } from "./theme-provider";
 
@@ -64,8 +64,26 @@ function ModelPicker({
     setFetching(true);
     setFetchError(null);
     try {
-      const r = await fetch(`/api/ai/models?base_url=${encodeURIComponent(baseUrl)}`);
-      const data = await r.json();
+      // Avoid putting http:// in the query string or raw JSON — NPM/OpenResty WAF
+      // often returns an HTML 403/404 for that (looks like SSRF).
+      const b64 = typeof btoa !== "undefined"
+        ? btoa(unescape(encodeURIComponent(baseUrl.trim())))
+        : Buffer.from(baseUrl.trim(), "utf8").toString("base64");
+      const r = await fetch("/api/ai/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base_url_b64: b64 }),
+      });
+      const text = await r.text();
+      let data: { models?: string[]; error?: string } = {};
+      try {
+        data = JSON.parse(text) as { models?: string[]; error?: string };
+      } catch {
+        throw new Error(
+          `Proxy blocked /api/ai/models (HTTP ${r.status}). ` +
+            `In Nginx Proxy Manager, disable "Block Common Exploits" for this host, or Save AI settings and use Test connection instead.`,
+        );
+      }
       if (!r.ok) throw new Error(data.error || r.statusText);
       setModels(data.models || []);
       setShowList(true);
@@ -128,12 +146,15 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
   const [captureFolder, setCaptureFolder] = useState("inbox");
   const [ai, setAi] = useState<AISettings>({
     enabled: false,
+    active_profile: "default",
+    profiles: [{ id: "default", name: "Default", provider: "ollama", base_url: "", model: "" }],
     provider: "ollama",
     base_url: "",
     model: "",
     embed_model: "",
     embed_base_url: "",
   });
+  const [profileName, setProfileName] = useState("Default");
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   const [embedStatus, setEmbedStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -206,7 +227,34 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     if (r.ok) {
       const data = (await r.json()) as SettingsDoc;
       setVaultName(data.vault_name || "Vault");
-      setAi({ embed_model: "", embed_base_url: "", ...data.ai });
+      const profiles =
+        data.ai.profiles?.length
+          ? data.ai.profiles
+          : [
+              {
+                id: "default",
+                name: "Default",
+                provider: data.ai.provider || "ollama",
+                base_url: data.ai.base_url || "",
+                model: data.ai.model || "",
+                embed_model: data.ai.embed_model,
+                embed_base_url: data.ai.embed_base_url,
+              },
+            ];
+      const active_profile = data.ai.active_profile || profiles[0]?.id || "default";
+      const active = profiles.find((p) => p.id === active_profile) ?? profiles[0];
+      const loadedAi: AISettings = {
+        enabled: Boolean(data.ai.enabled),
+        active_profile,
+        profiles,
+        provider: active?.provider || data.ai.provider || "ollama",
+        base_url: active?.base_url || data.ai.base_url || "",
+        model: active?.model || data.ai.model || "",
+        embed_model: active?.embed_model ?? data.ai.embed_model ?? "",
+        embed_base_url: active?.embed_base_url ?? data.ai.embed_base_url ?? "",
+      };
+      setAi(loadedAi);
+      setProfileName(active?.name ?? "Default");
       setAttachmentsSubdir(data.ui.attachments_subdir || "attachments");
       if (data.ui.start_page !== undefined) setStartPage(data.ui.start_page);
       setOpenDailyNote(Boolean(data.ui.open_daily_note));
@@ -237,6 +285,89 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     if (open) { loadSettings(); void loadVaults(); void loadGroups(); }
   }, [open, loadSettings, loadVaults, loadGroups]);
 
+  const selectAiProfile = (id: string) => {
+    const p = ai.profiles.find((x) => x.id === id);
+    if (!p) return;
+    setProfileName(p.name);
+    setAi({
+      ...ai,
+      active_profile: id,
+      provider: p.provider,
+      base_url: p.base_url,
+      model: p.model,
+      embed_model: p.embed_model ?? "",
+      embed_base_url: p.embed_base_url ?? "",
+    });
+  };
+
+  /** Persist current form fields into the active profile entry in local state. */
+  const syncFormIntoActiveProfile = useCallback((next: AISettings, name: string): AISettings => {
+    const profiles = next.profiles.map((p) =>
+      p.id === next.active_profile
+        ? {
+            ...p,
+            name: name.trim() || p.name,
+            provider: next.provider,
+            base_url: next.base_url,
+            model: next.model,
+            embed_model: next.embed_model?.trim() || undefined,
+            embed_base_url: next.embed_base_url?.trim() || undefined,
+          }
+        : p,
+    );
+    return { ...next, profiles };
+  }, []);
+
+  const addAiProfile = () => {
+    const name = window.prompt("New profile name", "Local MLX");
+    if (!name?.trim()) return;
+    const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `profile-${Date.now()}`;
+    let id = base;
+    if (ai.profiles.some((p) => p.id === id)) id = `${base}-${Date.now().toString(36)}`;
+    const synced = syncFormIntoActiveProfile(ai, profileName);
+    const neu: AIProfile = {
+      id,
+      name: name.trim(),
+      provider: synced.provider,
+      base_url: synced.base_url,
+      model: synced.model,
+      embed_model: synced.embed_model,
+      embed_base_url: synced.embed_base_url,
+    };
+    setProfileName(neu.name);
+    setAi({
+      ...synced,
+      profiles: [...synced.profiles, neu],
+      active_profile: id,
+    });
+  };
+
+  const deleteAiProfile = () => {
+    if (ai.profiles.length <= 1) {
+      window.alert("Cannot delete the last profile.");
+      return;
+    }
+    if (!window.confirm(`Delete profile “${profileName}”?`)) return;
+    const remaining = ai.profiles.filter((p) => p.id !== ai.active_profile);
+    const next = remaining[0];
+    setProfileName(next.name);
+    setAi({
+      ...ai,
+      profiles: remaining,
+      active_profile: next.id,
+      provider: next.provider,
+      base_url: next.base_url,
+      model: next.model,
+      embed_model: next.embed_model ?? "",
+      embed_base_url: next.embed_base_url ?? "",
+    });
+  };
+
+  const aiPayload = () => {
+    const synced = syncFormIntoActiveProfile(ai, profileName);
+    return synced;
+  };
+
   if (role !== "admin") return null;
 
   const save = async () => {
@@ -255,7 +386,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
             open_daily_note: openDailyNote,
             capture_folder: captureFolder,
           },
-          ai,
+          ai: aiPayload(),
         }),
       });
       const data = await r.json();
@@ -277,11 +408,17 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
       await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ai }),
+        body: JSON.stringify({ ai: aiPayload() }),
       });
       const r = await fetch("/api/ai/status");
-      const s = await r.json();
-      setAiStatus(s.connected ? `Connected · ${s.model}` : s.status_message);
+      const text = await r.text();
+      let s: { connected?: boolean; model?: string; status_message?: string } = {};
+      try {
+        s = JSON.parse(text) as typeof s;
+      } catch {
+        throw new Error(`Proxy returned non-JSON for /api/ai/status (HTTP ${r.status}). Check Nginx Proxy Manager.`);
+      }
+      setAiStatus(s.connected ? `Connected · ${s.model}` : s.status_message ?? "Unknown status");
     } catch (e) {
       setAiStatus(String(e));
     } finally {
@@ -296,11 +433,17 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
       await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ai }),
+        body: JSON.stringify({ ai: aiPayload() }),
       });
       const r = await fetch("/api/ai/status");
-      const s = await r.json();
-      setEmbedStatus(s.embed_status_message);
+      const text = await r.text();
+      let s: { embed_status_message?: string } = {};
+      try {
+        s = JSON.parse(text) as typeof s;
+      } catch {
+        throw new Error(`Proxy returned non-JSON for /api/ai/status (HTTP ${r.status}). Check Nginx Proxy Manager.`);
+      }
+      setEmbedStatus(s.embed_status_message ?? null);
     } catch (e) {
       setEmbedStatus(String(e));
     } finally {
@@ -313,7 +456,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     await fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ui: { autosave_seconds: secs, attachments_subdir: attachmentsSubdir }, ai }),
+      body: JSON.stringify({ ui: { autosave_seconds: secs, attachments_subdir: attachmentsSubdir }, ai: aiPayload() }),
     });
 
     setIndexing(true);
@@ -632,6 +775,41 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
                         <input type="checkbox" checked={ai.enabled} onChange={(e) => setAi({ ...ai, enabled: e.target.checked })} className="h-4 w-4" />
                         Enable KB assistant (RAG chat)
                       </label>
+
+                      <div className="mb-4 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 space-y-2">
+                        <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide">Profiles</p>
+                        <p className="text-xs text-[var(--muted)]">
+                          Save Local MLX, remote OpenAI, etc. as named profiles and switch between them.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            value={ai.active_profile}
+                            onChange={(e) => selectAiProfile(e.target.value)}
+                            className="min-w-[10rem] flex-1 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2 text-sm"
+                          >
+                            {ai.profiles.map((p) => (
+                              <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                          <button type="button" onClick={addAiProfile}
+                            className="rounded-lg border border-[var(--border)] px-2.5 py-2 text-xs hover:bg-[var(--border)]">
+                            New
+                          </button>
+                          <button type="button" onClick={deleteAiProfile} disabled={ai.profiles.length <= 1}
+                            className="rounded-lg border border-[var(--border)] px-2.5 py-2 text-xs text-red-600 hover:bg-[var(--border)] disabled:opacity-40">
+                            Delete
+                          </button>
+                        </div>
+                        <label className="block text-sm">
+                          Profile name
+                          <input
+                            value={profileName}
+                            onChange={(e) => setProfileName(e.target.value)}
+                            className="mt-1.5 w-full rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2 text-sm"
+                          />
+                        </label>
+                      </div>
+
                       <label className="mb-4 block text-sm">
                         Provider
                         <select value={ai.provider}

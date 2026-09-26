@@ -148,6 +148,7 @@ export const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, Props>(functi
       updateListener,
       pasteHandler,
       baseTheme,
+      EditorView.lineWrapping,
       EditorState.readOnly.of(readOnly),
       placeholder("Start writing…"),
       ...(dark ? [oneDark] : []),

@@ -17,6 +17,8 @@ export async function GET(req: NextRequest) {
     model: settings.ai.model,
     base_url: settings.ai.base_url,
     embed_base_url: settings.ai.embed_base_url || settings.ai.base_url,
+    active_profile: settings.ai.active_profile,
+    profiles: settings.ai.profiles.map((p) => ({ id: p.id, name: p.name })),
     has_api_key_env: aiRuntimeInfo().hasApiKey,
     connected: probe.ok,
     status_message: probe.message,

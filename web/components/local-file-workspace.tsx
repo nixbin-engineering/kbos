@@ -18,9 +18,16 @@ type ViewMode = "edit" | "preview" | "split";
 type Props = {
   fileId: string;
   autosaveSeconds?: number;
+  onDirtyChange?: (dirty: boolean) => void;
+  onRegisterSave?: (save: (() => Promise<boolean>) | null) => void;
 };
 
-export function LocalFileWorkspace({ fileId, autosaveSeconds = 5 }: Props) {
+export function LocalFileWorkspace({
+  fileId,
+  autosaveSeconds = 5,
+  onDirtyChange,
+  onRegisterSave,
+}: Props) {
   const [mode, setMode] = useState<ViewMode>("split");
   const [fileName, setFileName] = useState<string>("");
   const [content, setContent] = useState("");
@@ -30,7 +37,13 @@ export function LocalFileWorkspace({ fileId, autosaveSeconds = 5 }: Props) {
   const [error, setError] = useState<string | null>(null);
   const handleRef = useRef<FileSystemFileHandle | null>(null);
   const editorRef = useRef<CodeMirrorEditorHandle>(null);
-  const saveRef = useRef<() => Promise<void>>(undefined);
+  const saveRef = useRef<() => Promise<boolean>>(undefined);
+  const contentRef = useRef(content);
+  const dirtyRef = useRef(dirty);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  contentRef.current = content;
+  dirtyRef.current = dirty;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -49,6 +62,7 @@ export function LocalFileWorkspace({ fileId, autosaveSeconds = 5 }: Props) {
       const text = await readLocalFile(handle);
       setContent(text);
       setDirty(false);
+      dirtyRef.current = false;
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
@@ -57,19 +71,37 @@ export function LocalFileWorkspace({ fileId, autosaveSeconds = 5 }: Props) {
   }, [fileId]);
 
   useEffect(() => {
+    setDirty(false);
+    dirtyRef.current = false;
     void load();
-  }, [load]);
 
-  const save = useCallback(async () => {
+    return () => {
+      if (!dirtyRef.current) return;
+      const handle = handleRef.current;
+      const text = contentRef.current;
+      dirtyRef.current = false;
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      if (!handle) return;
+      void writeLocalFile(handle, text).catch(() => undefined);
+    };
+  }, [fileId, load]);
+
+  const save = useCallback(async (): Promise<boolean> => {
     const handle = handleRef.current;
-    if (!handle || !dirty) return;
+    if (!handle || !dirty) return true;
     setSaving(true);
     setError(null);
     try {
       await writeLocalFile(handle, content);
       setDirty(false);
+      dirtyRef.current = false;
+      return true;
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -78,16 +110,60 @@ export function LocalFileWorkspace({ fileId, autosaveSeconds = 5 }: Props) {
   saveRef.current = save;
 
   useEffect(() => {
-    if (!dirty) return;
-    const t = setTimeout(() => saveRef.current?.(), autosaveSeconds * 1000);
-    return () => clearTimeout(t);
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    onRegisterSave?.(save);
+    return () => onRegisterSave?.(null);
+  }, [save, onRegisterSave]);
+
+  useEffect(() => {
+    if (!dirty || !dirtyRef.current) return;
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null;
+      void saveRef.current?.();
+    }, autosaveSeconds * 1000);
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
   }, [content, dirty, autosaveSeconds]);
+
+  useEffect(() => {
+    const flushDisk = () => {
+      if (!dirtyRef.current) return;
+      const handle = handleRef.current;
+      if (!handle) return;
+      void writeLocalFile(handle, contentRef.current).catch(() => undefined);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") void saveRef.current?.();
+    };
+    const onPageHide = () => flushDisk();
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!dirtyRef.current) return;
+      flushDisk();
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        if (dirty) saveRef.current?.();
+        if (dirty) void saveRef.current?.();
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "e") {
         e.preventDefault();

@@ -58,9 +58,23 @@ export type FolderIndex = {
   entries: FolderIndexEntry[];
 };
 
+export type AIProvider = "ollama" | "openai_compatible";
+
+export type AIProfile = {
+  id: string;
+  name: string;
+  provider: AIProvider;
+  base_url: string;
+  model: string;
+  embed_model?: string;
+  embed_base_url?: string;
+};
+
 export type AISettings = {
   enabled: boolean;
-  provider: "ollama" | "openai_compatible";
+  active_profile: string;
+  profiles: AIProfile[];
+  provider: AIProvider;
   base_url: string;
   model: string;
   embed_model?: string;

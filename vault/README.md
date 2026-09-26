@@ -19,3 +19,7 @@ To use a different host path:
 # set VAULT_PATH in .env, then:
 ./manage.sh up
 ```
+
+## Syncing with another KBOS host
+
+The vault is plain files on disk — sync `VAULT_PATH` between laptop and server with Syncthing (recommended) or git. See [docs/vault-sync.md](../docs/vault-sync.md). Ignore template: [`.stignore.example`](./.stignore.example).

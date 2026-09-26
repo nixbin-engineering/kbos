@@ -90,12 +90,17 @@ Notes live in **`./vault/docs/`** (bind-mounted). Edit on the host or use the we
 
 Set `VAULT_PATH` or `KBOS_PORT` in `.env` (created by `setup`).
 
+## Multi-instance sync (laptop ↔ server)
+
+KBOS does not sync containers to each other. Sync the **vault bind-mount** with Syncthing (or git). Runbook: [docs/vault-sync.md](docs/vault-sync.md). Optional Syncthing sidecar: `./manage.sh sync:up`.
+
 ## Architecture
 
 | Service | Role |
 |---------|------|
 | `init` | One-shot: `kb init`, `kb rebuild` |
 | `web` | Next.js UI + interim filesystem API (`/api/*`) |
+| `syncthing` (optional) | Sibling container sharing `VAULT_PATH` — see `docker-compose.sync.yml` |
 
 The web app reads/writes markdown under `/vault/docs`. A **Go HTTP API** will replace these routes later.
 
@@ -106,7 +111,8 @@ manage.sh            Docker workflow helper
 cmd/kb/              Go CLI
 web/                 Next.js UI
 vault/               your notes (bind-mounted, gitignored)
-product.md           full specification
+docs/vault-sync.md   laptop↔server vault sync runbook
+docker-compose.sync.yml  optional Syncthing sibling
 ```
 
 ## Design rules

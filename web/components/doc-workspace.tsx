@@ -27,6 +27,8 @@ type Props = {
   onSaved?: () => void;
   onLiveTagsChange?: (tags: string[]) => void;
   onAskAi?: (prompt?: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onRegisterSave?: (save: (() => Promise<boolean>) | null) => void;
   scrollRef?: React.RefObject<HTMLDivElement | null>;
 };
 
@@ -180,6 +182,8 @@ export function DocWorkspace({
   onSaved,
   onLiveTagsChange,
   onAskAi,
+  onDirtyChange,
+  onRegisterSave,
   scrollRef,
 }: Props) {
   const [doc, setDoc] = useState<DocResponse | null>(null);
@@ -210,7 +214,19 @@ export function DocWorkspace({
     if (scrollRef) (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
   }, [scrollRef]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const saveRef = useRef<() => Promise<void>>(undefined);
+  const saveRef = useRef<() => Promise<boolean>>(undefined);
+  const pathRef = useRef(path);
+  const rawRef = useRef(raw);
+  const dirtyRef = useRef(dirty);
+  const encryptedRef = useRef(!!doc?.encrypted);
+  const onSavedRef = useRef(onSaved);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  pathRef.current = path;
+  rawRef.current = raw;
+  dirtyRef.current = dirty;
+  encryptedRef.current = !!doc?.encrypted;
+  onSavedRef.current = onSaved;
 
   const wikilinkSuggestions = useMemo(() => {
     if (!tree?.children) return [];
@@ -317,14 +333,43 @@ export function DocWorkspace({
   }, [path]);
 
   useEffect(() => {
-    if (!path) {
+    const trackedPath = path;
+
+    if (!trackedPath) {
       setDoc(null);
       setRaw("");
       setFolderIndex(null);
       setDiskChanged(false);
+      setDirty(false);
+      dirtyRef.current = false;
       return;
     }
-    void loadDoc(path);
+
+    // Clear dirty flag for the new path so autosave can't write the previous
+    // buffer here before loadDoc finishes (leave-flush already ran in cleanup).
+    setDirty(false);
+    dirtyRef.current = false;
+
+    void loadDoc(trackedPath);
+
+    return () => {
+      // Flush pending edits for this path before leaving (navigate / unmount).
+      if (!dirtyRef.current || encryptedRef.current) return;
+      const content = rawRef.current;
+      dirtyRef.current = false;
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      void fetch(`/api/docs/${trackedPath.split("/").map(encodeURIComponent).join("/")}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw: content }),
+        keepalive: true,
+      }).then((r) => {
+        if (r.ok) onSavedRef.current?.();
+      }).catch(() => undefined);
+    };
   }, [path, loadDoc]);
 
   useEffect(() => {
@@ -345,46 +390,120 @@ export function DocWorkspace({
     if (isIndexPage) loadFolderIndex();
   }, [tree, isIndexPage, loadFolderIndex]);
 
-  const save = useCallback(async () => {
-    if (!path || !dirty) return;
+  const putDoc = useCallback(async (docPath: string, content: string, opts?: { keepalive?: boolean }) => {
+    const r = await fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw: content }),
+      keepalive: opts?.keepalive,
+    });
+    if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+    if (opts?.keepalive) return null;
+    return (await r.json()) as DocResponse;
+  }, []);
+
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!path || !dirty || doc?.encrypted) return true;
     setSaving(true);
     setError(null);
     try {
-      const r = await fetch(`/api/docs/${path.split("/").map(encodeURIComponent).join("/")}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw }),
-      });
-      if (!r.ok) throw new Error((await r.json()).error || r.statusText);
-      const d = (await r.json()) as DocResponse;
+      const d = await putDoc(path, raw);
+      if (!d) return false;
       setDoc(d);
       setRaw(d.raw);
       setDirty(false);
+      dirtyRef.current = false;
       setSaveState("saved");
       onSaved?.();
       if (isIndexPage) loadFolderIndex();
+      return true;
     } catch (e) {
       setError(String(e));
       setSaveState("idle");
+      return false;
     } finally {
       setSaving(false);
     }
-  }, [path, raw, dirty, onSaved, isIndexPage, loadFolderIndex]);
+  }, [path, raw, dirty, doc?.encrypted, onSaved, isIndexPage, loadFolderIndex, putDoc]);
 
   saveRef.current = save;
 
   useEffect(() => {
-    if (!dirty || !path) return;
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  // Keep parent dirty flag in sync immediately on edits (don't wait for effect).
+  const markDirty = useCallback(() => {
+    setDirty(true);
+    dirtyRef.current = true;
+    onDirtyChange?.(true);
+  }, [onDirtyChange]);
+
+  useEffect(() => {
+    onRegisterSave?.(save);
+    return () => onRegisterSave?.(null);
+  }, [save, onRegisterSave]);
+
+  /** Keepalive write for unload — does not clear dirty (so beforeunload can still warn). */
+  const keepaliveSave = useCallback(() => {
+    const docPath = pathRef.current;
+    if (!docPath || !dirtyRef.current || encryptedRef.current) return;
+    const content = rawRef.current;
+    void fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw: content }),
+      keepalive: true,
+    }).then((r) => {
+      if (r.ok) onSavedRef.current?.();
+    }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    // dirtyRef may already be false if a path-leave flush just ran — don't
+    // schedule an autosave of the previous buffer into the new path.
+    if (!dirty || !path || !dirtyRef.current) return;
     setSaveState("pending");
-    const t = setTimeout(() => saveRef.current?.(), autosaveSeconds * 1000);
-    return () => clearTimeout(t);
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null;
+      void saveRef.current?.();
+    }, autosaveSeconds * 1000);
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
   }, [raw, dirty, path, autosaveSeconds]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      // Tab switch: normal save (clears dirty when done). Do not clear dirty
+      // synchronously — that would suppress the beforeunload dialog on close.
+      if (document.visibilityState === "hidden") void saveRef.current?.();
+    };
+    const onPageHide = () => keepaliveSave();
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!dirtyRef.current || !pathRef.current || encryptedRef.current) return;
+      keepaliveSave();
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, [keepaliveSave]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        if (dirty) saveRef.current?.();
+        if (dirty) void saveRef.current?.();
       }
       // View mode shortcuts: Ctrl+E = edit, Ctrl+Shift+P = preview, Ctrl+\ = split
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "e") {
@@ -420,11 +539,11 @@ export function DocWorkspace({
   const toggleTask = useCallback(
     (index: number, checked: boolean) => {
       setRaw((prev) => toggleTaskInRaw(prev, bodyFromRaw(prev), index, checked));
-      setDirty(true);
+      markDirty();
       setDiskChanged(false);
       setSaveState("pending");
     },
-    [],
+    [markDirty],
   );
 
   const uploadImage = useCallback(
@@ -442,7 +561,7 @@ export function DocWorkspace({
         if (!r.ok) throw new Error(data.error || r.statusText);
         const snippet = `\n${data.markdown}\n`;
         editorRef.current?.insertAt(cursor, snippet);
-        setDirty(true);
+        markDirty();
         setDiskChanged(false);
         setSaveState("pending");
         requestAnimationFrame(() => editorRef.current?.focus());
@@ -452,7 +571,7 @@ export function DocWorkspace({
         setUploading(false);
       }
     },
-    [path, raw],
+    [path, raw, markDirty],
   );
 
   const onEditorPaste = useCallback(
@@ -490,7 +609,7 @@ export function DocWorkspace({
         value={raw}
         onChange={(val) => {
           setRaw(val);
-          setDirty(true);
+          markDirty();
           setDiskChanged(false);
           setSaveState("pending");
         }}
@@ -847,7 +966,7 @@ export function DocWorkspace({
             onOpenDoc={onOpenDoc}
             onRestore={(content) => {
               setRaw(content);
-              setDirty(true);
+              markDirty();
               setSaveState("pending");
             }}
           />
