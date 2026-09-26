@@ -1,0 +1,34 @@
+# Optional CPU Ollama sidecar for KBOS RAG (chat + embeddings).
+# Does not start with default ./manage.sh start; use:
+#   ./manage.sh rag:up
+#   ./manage.sh rag:pull          # download default small models
+#   ./manage.sh rag:down
+#
+# KBOS web is on the external `proxy` network — this service joins it so the
+# app can call http://kbos-ollama:11434/v1 (also published on the host).
+# CPU-only: fine for embeddings + short RAG answers; not GPU-fast chat.
+#
+# Defaults (override in .env):
+#   RAG_CHAT_MODEL=qwen2.5:1.5b
+#   RAG_EMBED_MODEL=nomic-embed-text
+#   OLLAMA_PORT=11434
+#   OLLAMA_DATA=./.ollama
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kbos-ollama
+    hostname: kbos-ollama
+    volumes:
+      - ${OLLAMA_DATA:-./.ollama}:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    networks:
+      - proxy
+    restart: unless-stopped
+    # No GPU devices — intentional lightweight CPU sidecar.
+
+networks:
+  proxy:
+    name: proxy
+    external: true

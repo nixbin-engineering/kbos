@@ -87,6 +87,17 @@ Set `VAULT_PATH` or `KBOS_PORT` in `.env` (created by `setup --dev`).
 
 KBOS does not sync containers to each other. Sync the **vault bind-mount** with Syncthing (or git). Runbook: [docs/vault-sync.md](docs/vault-sync.md). Optional Syncthing sidecar: `./manage.sh sync:up`.
 
+## Optional RAG sidecar (CPU Ollama)
+
+```bash
+./manage.sh rag:up --pull    # start sidecar + pull small chat/embed models
+./manage.sh rag:pull --small # or pull later
+./manage.sh rag:status
+./manage.sh rag:down
+```
+
+Defaults: chat `qwen2.5:1.5b`, embed `nomic-embed-text` (override via `RAG_CHAT_MODEL` / `RAG_EMBED_MODEL` in `.env`). Point Admin → AI at `http://kbos-ollama:11434/v1`. CPU-only — usable for short vault Q&A, not GPU-fast.
+
 ## Architecture
 
 | Service | Role |
@@ -94,6 +105,7 @@ KBOS does not sync containers to each other. Sync the **vault bind-mount** with 
 | `init` | One-shot: `kb init`, `kb rebuild` |
 | `web` | Next.js UI + interim filesystem API (`/api/*`) |
 | `syncthing` (optional) | Sibling container sharing `VAULT_PATH` — see `docker-compose.sync.yml` |
+| `ollama` (optional) | CPU RAG sidecar — `./manage.sh rag:up` / `docker-compose.rag.yml` |
 
 The web app reads/writes markdown under `/vault/docs`. A **Go HTTP API** will replace these routes later.
 
@@ -108,6 +120,7 @@ docs/vault-sync.md      laptop↔server vault sync runbook
 docker-compose.yml      production (default) — pull ghcr image
 docker-compose.dev.yml  local — build from source (--dev)
 docker-compose.sync.yml optional Syncthing sibling
+docker-compose.rag.yml  optional CPU Ollama RAG sidecar
 ```
 
 ## Design rules

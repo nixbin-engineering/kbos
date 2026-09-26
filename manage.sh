@@ -119,12 +119,13 @@ COMMANDS
   fix-perms               chown vault/ to your user (fixes root-owned files)
 
   docker:version          Show current release tag (git) and what --patch/--minor/--major would produce
-  docker:build --prod [--major|--minor|--patch|-t TAG]
+  docker:build --prod [--major|--minor|--patch|-t TAG] [--apple]
                           Build image from web/Dockerfile, tagged $IMAGE_REPO:TAG + :latest
+                          Platform: linux/amd64 (Intel) by default; pass --apple for arm64
                           (no bump/-t: reuses current release tag; does not push or tag git)
-  docker:push --prod [--major|--minor|--patch|-t TAG]
+  docker:push --prod [--major|--minor|--patch|-t TAG] [--apple]
                           Smoke-test the running stack, then build + push
-                          $IMAGE_REPO:TAG and :latest
+                          $IMAGE_REPO:TAG and :latest (same platform defaults as docker:build)
                           (--major/--minor/--patch also creates and pushes a git release tag)
   secrets:rotate [KEY ...]
                           Rotate secret-like keys in .env (or only the ones named)
@@ -135,6 +136,14 @@ COMMANDS
   sync:up                 Start optional Syncthing sibling (docker-compose.sync.yml)
   sync:down               Stop Syncthing only (KBOS keeps running)
                           See docs/vault-sync.md for laptop↔server vault sync
+
+  rag:up [--pull]         Start CPU Ollama sidecar (docker-compose.rag.yml)
+                          Optional --pull downloads default small models
+  rag:down                Stop Ollama sidecar (KBOS unchanged)
+  rag:pull [--small|--chat|--embed|MODEL…]
+                          Download models into the sidecar (default: --small)
+  rag:status              Ollama health + installed models
+  rag:logs                Follow Ollama logs
 
   help | -h | --help      Show this help
 
@@ -209,10 +218,14 @@ EXAMPLES
   VAULT_PATH=/data/notes ./manage.sh setup --dev
 
   ./manage.sh docker:version
-  ./manage.sh docker:build --prod --patch
+  ./manage.sh docker:build --prod --patch          # linux/amd64 (Intel) — for prod servers
+  ./manage.sh docker:build --prod --patch --apple  # linux/arm64 (Apple Silicon)
   ./manage.sh docker:push --prod --minor
   ./manage.sh deploy:release   # run on the prod server
   ./manage.sh sync:up          # optional Syncthing for laptop↔server vault sync
+  ./manage.sh rag:up --pull    # optional CPU Ollama + small chat/embed models
+  ./manage.sh rag:pull --small
+  ./manage.sh rag:status
 
 
 ARCHITECTURE
@@ -414,6 +427,7 @@ cmd_docker_version() {
 
 # Parses --major/--minor/--patch/-t TAG (mutually exclusive) into $TAG_ARG,
 # falling back to the current release tag when none is given.
+# Ignores --prod / --apple / --intel (handled elsewhere).
 resolve_release_tag() {
   local bump="" tag="" next_is_tag=false a
   for a in "$@"; do
@@ -423,7 +437,7 @@ resolve_release_tag() {
       --minor) bump=minor ;;
       --patch) bump=patch ;;
       -t|--tag) next_is_tag=true ;;
-      --prod) ;;
+      --prod|--apple|--intel) ;;
       *) red "Unknown flag: $a"; exit 1 ;;
     esac
   done
@@ -444,13 +458,27 @@ resolve_release_tag() {
   fi
 }
 
+# Release images default to linux/amd64 (Intel servers). Pass --apple for arm64.
+resolve_build_platform() {
+  DOCKER_PLATFORM="linux/amd64"
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --apple) DOCKER_PLATFORM="linux/arm64" ;;
+      --intel) DOCKER_PLATFORM="linux/amd64" ;;
+    esac
+  done
+}
+
 cmd_docker_build() {
-  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:build --prod [--major|--minor|--patch|-t TAG]"; exit 1; }
-  local TAG_ARG BUMP_KIND
+  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:build --prod [--major|--minor|--patch|-t TAG] [--apple]"; exit 1; }
+  local TAG_ARG BUMP_KIND DOCKER_PLATFORM
   resolve_release_tag "$@"
-  bold "Building ${IMAGE_REPO}:${TAG_ARG} (+ :latest) from web/Dockerfile"
-  docker build -f web/Dockerfile -t "${IMAGE_REPO}:${TAG_ARG}" -t "${IMAGE_REPO}:latest" .
-  green "Built ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
+  resolve_build_platform "$@"
+  bold "Building ${IMAGE_REPO}:${TAG_ARG} (+ :latest) for ${DOCKER_PLATFORM} from web/Dockerfile"
+  docker build --platform "$DOCKER_PLATFORM" -f web/Dockerfile \
+    -t "${IMAGE_REPO}:${TAG_ARG}" -t "${IMAGE_REPO}:latest" .
+  green "Built ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest (${DOCKER_PLATFORM})"
 }
 
 # Smoke test gate for docker:push — blocks the release if the running stack's
@@ -468,12 +496,15 @@ cmd_smoke_test() {
 }
 
 cmd_docker_push() {
-  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:push --prod [--major|--minor|--patch|-t TAG]"; exit 1; }
-  local TAG_ARG BUMP_KIND
+  [[ " $* " == *" --prod "* ]] || { red "Usage: ./manage.sh docker:push --prod [--major|--minor|--patch|-t TAG] [--apple]"; exit 1; }
+  local TAG_ARG BUMP_KIND DOCKER_PLATFORM build_args=()
   resolve_release_tag "$@"
+  resolve_build_platform "$@"
   cmd_smoke_test
-  cmd_docker_build --prod -t "$TAG_ARG"
-  bold "Pushing ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest"
+  build_args=(--prod -t "$TAG_ARG")
+  [[ "$DOCKER_PLATFORM" == "linux/arm64" ]] && build_args+=(--apple)
+  cmd_docker_build "${build_args[@]}"
+  bold "Pushing ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest (${DOCKER_PLATFORM})"
   docker push "${IMAGE_REPO}:${TAG_ARG}"
   docker push "${IMAGE_REPO}:latest"
   green "Pushed ${IMAGE_REPO}:${TAG_ARG} (and :latest)"
@@ -576,6 +607,188 @@ cmd_sync_down() {
   green "Syncthing stopped."
 }
 
+# ── Optional RAG sidecar (CPU Ollama) ─────────────────────────────────────────
+
+RAG_COMPOSE="docker-compose.rag.yml"
+OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-kbos-ollama}"
+
+dc_rag() {
+  load_env
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$RAG_COMPOSE" "$@"
+}
+
+rag_defaults() {
+  RAG_CHAT_MODEL="${RAG_CHAT_MODEL:-qwen2.5:1.5b}"
+  RAG_EMBED_MODEL="${RAG_EMBED_MODEL:-nomic-embed-text}"
+  OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+}
+
+rag_wait_ready() {
+  local i
+  bold "Waiting for Ollama to accept requests…"
+  for i in $(seq 1 60); do
+    if docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1; then
+      green "Ollama is ready."
+      return 0
+    fi
+    sleep 1
+  done
+  red "Ollama did not become ready in time. Check: ./manage.sh rag:logs"
+  return 1
+}
+
+rag_print_ai_hint() {
+  rag_defaults
+  bold "Point KBOS Admin → AI at the sidecar:"
+  echo "  Base URL (from KBOS container): http://${OLLAMA_CONTAINER}:11434/v1"
+  echo "  Base URL (from host):           http://127.0.0.1:${OLLAMA_PORT}/v1"
+  echo "  Chat model:                     ${RAG_CHAT_MODEL}"
+  echo "  Embedding model:                ${RAG_EMBED_MODEL}"
+  echo "  Provider:                       Ollama"
+  bold "Then enable AI and rebuild the vector index in Admin settings."
+  bold "CPU-only: expect slow but usable short RAG answers."
+}
+
+cmd_rag_up() {
+  local do_pull=false a
+  for a in "$@"; do
+    case "$a" in
+      --pull) do_pull=true ;;
+      -h|--help)
+        echo "Usage: ./manage.sh rag:up [--pull]"
+        exit 0
+        ;;
+      *) red "Unknown flag: $a"; echo "Usage: ./manage.sh rag:up [--pull]"; exit 1 ;;
+    esac
+  done
+
+  load_env
+  rag_defaults
+  mkdir -p "${OLLAMA_DATA:-./.ollama}"
+  bold "Starting CPU Ollama sidecar (${RAG_COMPOSE})…"
+  dc_rag up -d ollama
+  rag_wait_ready
+  if $do_pull; then
+    cmd_rag_pull --small
+  else
+    bold "Models not pulled. Download defaults with: ./manage.sh rag:pull --small"
+  fi
+  green "RAG sidecar running (container ${OLLAMA_CONTAINER})."
+  rag_print_ai_hint
+}
+
+cmd_rag_down() {
+  load_env
+  bold "Stopping Ollama sidecar (KBOS unchanged)…"
+  dc_rag stop ollama "$@" || true
+  dc_rag rm -f ollama "$@" || true
+  green "Ollama sidecar stopped."
+}
+
+cmd_rag_pull() {
+  load_env
+  rag_defaults
+
+  local models=() a want_small=false want_chat=false want_embed=false
+  if [[ $# -eq 0 ]]; then
+    want_small=true
+  fi
+  for a in "$@"; do
+    case "$a" in
+      --small) want_small=true ;;
+      --chat)  want_chat=true ;;
+      --embed) want_embed=true ;;
+      -h|--help)
+        cat <<EOF
+Usage: ./manage.sh rag:pull [--small|--chat|--embed|MODEL…]
+
+  --small   Default small pair (chat + embed) — also the no-arg default
+            chat:  \${RAG_CHAT_MODEL:-qwen2.5:1.5b}
+            embed: \${RAG_EMBED_MODEL:-nomic-embed-text}
+  --chat    Pull only the default chat model
+  --embed   Pull only the default embedding model
+  MODEL…    Pull one or more explicit Ollama model names
+
+Examples:
+  ./manage.sh rag:pull
+  ./manage.sh rag:pull --small
+  ./manage.sh rag:pull --embed
+  ./manage.sh rag:pull llama3.2:1b nomic-embed-text
+EOF
+        exit 0
+        ;;
+      -*)
+        red "Unknown flag: $a"
+        exit 1
+        ;;
+      *)
+        models+=("$a")
+        ;;
+    esac
+  done
+
+  if ! docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1; then
+    red "Ollama is not running. Start it first: ./manage.sh rag:up"
+    exit 1
+  fi
+
+  if $want_small || $want_chat; then
+    models+=("$RAG_CHAT_MODEL")
+  fi
+  if $want_small || $want_embed; then
+    models+=("$RAG_EMBED_MODEL")
+  fi
+
+  # Deduplicate while preserving order (no associative arrays — macOS bash 3.2)
+  local unique=() m u dup
+  for m in "${models[@]}"; do
+    dup=false
+    for u in "${unique[@]+"${unique[@]}"}"; do
+      [[ "$u" == "$m" ]] && { dup=true; break; }
+    done
+    $dup || unique+=("$m")
+  done
+  models=("${unique[@]}")
+
+  if [[ ${#models[@]} -eq 0 ]]; then
+    red "No models to pull."
+    exit 1
+  fi
+
+  for m in "${models[@]}"; do
+    bold "Pulling ${m} (may take a while on first download)…"
+    docker exec "$OLLAMA_CONTAINER" ollama pull "$m"
+    green "Pulled ${m}"
+  done
+  bold "Installed models:"
+  docker exec "$OLLAMA_CONTAINER" ollama list
+  rag_print_ai_hint
+}
+
+cmd_rag_status() {
+  load_env
+  rag_defaults
+  if ! docker inspect "$OLLAMA_CONTAINER" >/dev/null 2>&1; then
+    red "Container ${OLLAMA_CONTAINER} not found. Start with: ./manage.sh rag:up"
+    exit 1
+  fi
+  local state
+  state="$(docker inspect -f '{{.State.Status}}' "$OLLAMA_CONTAINER" 2>/dev/null || echo unknown)"
+  bold "Ollama container: ${OLLAMA_CONTAINER} (${state})"
+  if docker exec "$OLLAMA_CONTAINER" ollama list >/dev/null 2>&1; then
+    green "API: reachable"
+    docker exec "$OLLAMA_CONTAINER" ollama list
+  else
+    red "API: not reachable yet"
+  fi
+  rag_print_ai_hint
+}
+
+cmd_rag_logs() {
+  load_env
+  dc_rag logs -f ollama "$@"
+}
+
 main() {
   # Global help flags (./manage.sh --help, ./manage.sh -h, ./manage.sh)
   if [[ $# -eq 0 ]] || [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -642,6 +855,11 @@ main() {
     deploy:release) cmd_deploy_release ;;
     sync:up) cmd_sync_up ;;
     sync:down) cmd_sync_down "$@" ;;
+    rag:up) cmd_rag_up "$@" ;;
+    rag:down) cmd_rag_down "$@" ;;
+    rag:pull) cmd_rag_pull "$@" ;;
+    rag:status) cmd_rag_status ;;
+    rag:logs) cmd_rag_logs "$@" ;;
     *)
       red "Unknown command: $cmd"
       usage

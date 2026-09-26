@@ -130,6 +130,15 @@ The AI has access to your vault content and can:
 
 The scope selector (Vault / Folder / Document) controls how much context the AI sees.
 
+To run a **CPU-only Ollama sidecar** with KBOS (no host GPU required):
+
+```bash
+./manage.sh rag:up --pull    # start + download small chat/embed models
+./manage.sh rag:status
+```
+
+Then in **Admin → AI**, set provider to Ollama, base URL to `http://kbos-ollama:11434/v1`, chat model `qwen2.5:1.5b`, embedding model `nomic-embed-text`, enable AI, and rebuild the vector index. Expect slow but usable short answers on CPU.
+
 :::example
 > [!TIP]
 > For best results, ask specific questions: *"What did we decide about the API design in the architecture notes?"*

@@ -5,6 +5,7 @@ vault/*
 !vault/README.md
 !vault/.stignore.example
 .syncthing/
+.ollama/
 # Go
 /bin/
 /dist/
