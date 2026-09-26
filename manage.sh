@@ -8,10 +8,49 @@ cd "$ROOT"
 ENV_FILE="${ENV_FILE:-.env}"
 VAULT_DIR="${VAULT_DIR:-./vault}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/nixbin-engineering/kbos}"
+# Production (default) pulls a pre-built image; --dev builds from source.
+COMPOSE_PROD="${COMPOSE_PROD:-docker-compose.yml}"
+COMPOSE_DEV="${COMPOSE_DEV:-docker-compose.dev.yml}"
 
 red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+# --dev / --prod pick the compose file. Default is production.
+# docker:build / docker:push keep --prod (release-tier guard); it is not stripped.
+USE_DEV=false
+_FLAG_COMPOSE=""
+_REMAINING_ARGS=()
+case "${1:-}" in
+  docker:build|docker:push) _PRESERVE_TIER_FLAGS=true ;;
+  *)                        _PRESERVE_TIER_FLAGS=false ;;
+esac
+for _arg in "$@"; do
+  case "$_arg" in
+    --dev)
+      USE_DEV=true
+      _FLAG_COMPOSE="$COMPOSE_DEV"
+      if $_PRESERVE_TIER_FLAGS; then _REMAINING_ARGS+=("$_arg"); fi
+      ;;
+    --prod)
+      USE_DEV=false
+      _FLAG_COMPOSE="$COMPOSE_PROD"
+      if $_PRESERVE_TIER_FLAGS; then _REMAINING_ARGS+=("$_arg"); fi
+      ;;
+    *) _REMAINING_ARGS+=("$_arg") ;;
+  esac
+done
+set -- "${_REMAINING_ARGS[@]+"${_REMAINING_ARGS[@]}"}"
+unset _REMAINING_ARGS _arg _PRESERVE_TIER_FLAGS
+
+# Resolved after load_env so --dev/--prod win over COMPOSE_FILE in .env.
+resolve_compose_file() {
+  if [[ -n "$_FLAG_COMPOSE" ]]; then
+    COMPOSE_FILE="$_FLAG_COMPOSE"
+  elif [[ -z "${COMPOSE_FILE:-}" ]]; then
+    COMPOSE_FILE="$COMPOSE_PROD"
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -28,22 +67,31 @@ Everything runs in Docker — no Go or Node required on the host.
 QUICK START
 -----------
 
-  ./manage.sh setup       First time: .env, vault/, build images, init vault
-  ./manage.sh start       Start web UI in background (detached)
-  ./manage.sh up          Start web UI in foreground (logs in terminal)
-  ./manage.sh open        Print UI URL (default http://localhost:3000)
+  Production (default — pulls ghcr.io image):
 
-After changing application code:
+  ./manage.sh start                 Start web UI in background
+  ./manage.sh up                    Foreground (logs attached)
+  ./manage.sh deploy:release        On the server: git pull, image pull, up -d
 
-  ./manage.sh build       Rebuild Docker images
-  ./manage.sh restart     Recreate web container (picks up newly built image)
+  Local / from source (--dev — builds images):
+
+  ./manage.sh setup --dev           First time: .env, vault/, build, init
+  ./manage.sh up --dev              Bring up the dev stack
+  ./manage.sh build --dev           Rebuild after code changes
+  ./manage.sh restart --dev         Recreate web with newly built image
+
+  ./manage.sh open                  Print UI URL (default http://localhost:3000)
 
 
 COMMANDS
 --------
 
+  --dev / --prod          Global: pick docker-compose.dev.yml or docker-compose.yml
+                          (default: production / docker-compose.yml)
+
   setup                   Create .env, vault dir, fix permissions, build, init
-  build                   Build/rebuild Docker images (run after code changes)
+                          (requires --dev — builds from source)
+  build                   Build/rebuild Docker images (requires --dev)
   up [args]               Start services in foreground (logs attached)
   start [args]            Start services in background (-d)
   down | stop             Stop services
@@ -81,7 +129,8 @@ COMMANDS
   secrets:rotate [KEY ...]
                           Rotate secret-like keys in .env (or only the ones named)
                           Backs up .env first; does not restart anything
-  deploy:release          On the prod server: git pull --ff-only, pull the new image, up -d
+  deploy:release          On the prod server: git pull --ff-only, pull $IMAGE_REPO:latest,
+                          then up -d (always uses production compose)
 
   sync:up                 Start optional Syncthing sibling (docker-compose.sync.yml)
   sync:down               Stop Syncthing only (KBOS keeps running)
@@ -138,23 +187,26 @@ FIRST RUN / AUTH
 ENVIRONMENT (.env)
 ------------------
 
-Created by ./manage.sh setup. Safe to edit.
+Created by ./manage.sh setup --dev. Safe to edit.
 
   DOCKER_UID              Host user ID (containers write vault as this user)
   DOCKER_GID              Host group ID
   VAULT_PATH              Host path bind-mounted to /vault (default: ./vault)
   KBOS_PORT               Web UI host port (default: 3000)
+  COMPOSE_FILE            Optional override (else --dev → docker-compose.dev.yml,
+                          default → docker-compose.yml)
 
 
 EXAMPLES
 --------
 
-  ./manage.sh setup
-  ./manage.sh up -d
-  ./manage.sh build && ./manage.sh restart
+  ./manage.sh start
+  ./manage.sh up --dev
+  ./manage.sh setup --dev
+  ./manage.sh build --dev && ./manage.sh restart --dev
   ./manage.sh search tag:welcome
   ./manage.sh kb -V /vault doctor
-  VAULT_PATH=/data/notes ./manage.sh setup
+  VAULT_PATH=/data/notes ./manage.sh setup --dev
 
   ./manage.sh docker:version
   ./manage.sh docker:build --prod --patch
@@ -204,7 +256,7 @@ EOF
 
 load_env() {
   if [[ ! -f "$ENV_FILE" ]]; then
-    red "Missing ${ENV_FILE}. Run: ./manage.sh setup"
+    red "Missing ${ENV_FILE}. Run: ./manage.sh setup --dev"
     exit 1
   fi
   set -a
@@ -215,6 +267,7 @@ load_env() {
   export DOCKER_GID="${DOCKER_GID:-1000}"
   export KBOS_PORT="${KBOS_PORT:-3000}"
   export VAULT_PATH="${VAULT_PATH:-./vault}"
+  resolve_compose_file
 }
 
 ensure_vault_dir() {
@@ -237,11 +290,22 @@ fix_perms() {
 dc() {
   load_env
   ensure_vault_dir
-  docker compose --env-file "$ENV_FILE" "$@"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+# setup / build only make sense against the source-build compose.
+require_dev_compose() {
+  resolve_compose_file
+  if [[ "$COMPOSE_FILE" != "$COMPOSE_DEV" ]]; then
+    red "This command builds from source — pass --dev (uses ${COMPOSE_DEV})."
+    red "Example: ./manage.sh $1 --dev"
+    exit 1
+  fi
 }
 
 cmd_setup() {
-  bold "KBOS setup"
+  require_dev_compose setup
+  bold "KBOS setup (${COMPOSE_FILE})"
   write_env
   load_env
   ensure_vault_dir
@@ -251,7 +315,7 @@ cmd_setup() {
   bold "Initializing vault…"
   dc run --rm init
   green "Setup complete."
-  green "Start the UI: ./manage.sh start"
+  green "Start the UI: ./manage.sh start --dev"
   green "URL: http://localhost:${KBOS_PORT}"
 }
 
@@ -469,15 +533,19 @@ cmd_secrets_rotate() {
   bold "Run ./manage.sh restart (or deploy:release on the server) to apply the new values."
 }
 
+# Production release deploy: always pull the published image (never build).
 cmd_deploy_release() {
-  bold "Deploying latest release"
+  USE_DEV=false
+  _FLAG_COMPOSE="$COMPOSE_PROD"
+  COMPOSE_FILE="$COMPOSE_PROD"
+  bold "Deploying latest release (${COMPOSE_FILE} — pull image, do not build)"
   if [[ -d .git ]]; then
     bold "Pulling latest repo changes…"
     git pull --ff-only
   fi
   load_env
   ensure_vault_dir
-  bold "Pulling latest images…"
+  bold "Pulling ${IMAGE_REPO}:latest…"
   dc pull
   bold "Starting services…"
   dc up -d
@@ -495,7 +563,7 @@ cmd_sync_up() {
     green "Installed ${VAULT_PATH}/.stignore from vault/.stignore.example"
   fi
   bold "Starting Syncthing sibling (shares VAULT_PATH=${VAULT_PATH})…"
-  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml up -d syncthing
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f docker-compose.sync.yml up -d syncthing
   green "Syncthing UI: http://localhost:${SYNCTHING_UI_PORT:-8384}"
   bold "In the UI, add shared folder path /vault and pair the other host. See docs/vault-sync.md"
 }
@@ -503,8 +571,8 @@ cmd_sync_up() {
 cmd_sync_down() {
   load_env
   bold "Stopping Syncthing sibling (KBOS unchanged)…"
-  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml stop syncthing "$@" || true
-  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.sync.yml rm -f syncthing "$@" || true
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f docker-compose.sync.yml stop syncthing "$@" || true
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f docker-compose.sync.yml rm -f syncthing "$@" || true
   green "Syncthing stopped."
 }
 
@@ -520,7 +588,7 @@ main() {
   case "$cmd" in
     setup) cmd_setup ;;
     fix-perms) fix_perms ;;
-    build) load_env && dc build "$@" ;;
+    build) require_dev_compose build; load_env && dc build "$@" ;;
     up) cmd_up "$@" ;;
     start) cmd_start "$@" ;;
     down|stop) load_env && dc down "$@" ;;

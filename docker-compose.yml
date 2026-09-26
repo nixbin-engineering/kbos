@@ -1,28 +1,24 @@
-# KBOS — use ./manage.sh (setup, up, down, init, fix-perms, …)
-# VAULT_PATH  → main vault (mounted at /vault)
-# VAULTS_BASE → directory housing all vaults (mounted at /vaults)
+# KBOS — production (default). Pulls pre-built image from ghcr.io.
+#   ./manage.sh start
+#   ./manage.sh deploy:release
+# Local/source builds: ./manage.sh --dev up  (docker-compose.dev.yml)
 
 services:
   init:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/nixbin-engineering/kbos:latest
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     volumes:
       - ${VAULT_PATH:-./vault}:/vault
       - ${VAULTS_BASE:-./vaults}:/vaults
-      - ./scripts/init-vault.sh:/scripts/init-vault.sh:ro
     entrypoint: ["/bin/sh", "/scripts/init-vault.sh"]
     restart: "no"
 
   web:
-    build:
-      context: .
-      dockerfile: web/Dockerfile
+    image: ghcr.io/nixbin-engineering/kbos:latest
     container_name: kbos
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
-    #ports:
-    #  - "${KBOS_PORT:-3000}:3000"
+    ports:
+      - "${KBOS_PORT:-3000}:3000"
     networks:
       - proxy
     # Reach host LLM/MLX (Ollama, etc.) via host.docker.internal — required on Linux;
@@ -32,6 +28,7 @@ services:
     environment:
       VAULT_PATH: /vault
       VAULTS_BASE: /vaults
+      NODE_ENV: production
     volumes:
       - ${VAULT_PATH:-./vault}:/vault
       - ${VAULTS_BASE:-./vaults}:/vaults
@@ -49,6 +46,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
 networks:
   proxy:
     name: proxy

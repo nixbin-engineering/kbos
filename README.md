@@ -2,9 +2,9 @@
 
 Local-first knowledge base. **Markdown on disk is the only source of truth.**
 
-## Production — pre-built image
+## Production — pre-built image (default)
 
-The fastest way to run KBOS. No build step required.
+`docker-compose.yml` pulls `ghcr.io/nixbin-engineering/kbos:latest`. No build step.
 
 **1. Create your data directories and env file**
 
@@ -17,32 +17,25 @@ cp .env.example .env
 **2. Pull and start**
 
 ```bash
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
+./manage.sh deploy:release   # preferred on the server (git pull + image pull + up -d)
+# or:
+./manage.sh start
 ```
 
 **3. Create the first admin user**
 
 ```bash
-docker compose -f docker-compose.prod.yml exec web \
-  kb -V /vault user add admin --admin -p 'changeme'
+./manage.sh kb -V /vault user add admin --admin -p 'changeme'
 ```
 
 **4. Open the UI**
 
 Navigate to `http://localhost:${KBOS_PORT}` (default `http://localhost:3000`).
 
-**Upgrading**
-
-```bash
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
-```
-
 **Stopping**
 
 ```bash
-docker compose -f docker-compose.prod.yml down
+./manage.sh down
 ```
 
 ### .env settings
@@ -57,22 +50,22 @@ Copy `.env.example` to `.env` and adjust:
 | `VAULTS_BASE` | `./vaults` | Path to the multi-vault base directory on the host |
 | `KBOS_PORT` | `3000` | Host port the web UI is exposed on |
 
-> **Reverse proxy**: If you front KBOS with nginx/Caddy, you can remove the `ports:` block from `docker-compose.prod.yml` and use the `proxy` external network instead.
+> **Reverse proxy**: If you front KBOS with nginx/Caddy, you can remove the `ports:` block from `docker-compose.yml` and use the `proxy` external network instead.
 
 ---
 
 ## Local build (from source)
 
-No Go, Node, or other tools on the host — only Docker and `manage.sh`.
+Uses `docker-compose.dev.yml` via `--dev`. No Go/Node on the host — only Docker and `manage.sh`.
 
 ```bash
 chmod +x manage.sh
-./manage.sh setup    # first time: .env, vault/, build, init
-./manage.sh start    # start UI in background
-./manage.sh build    # after code changes
+./manage.sh setup --dev    # first time: .env, vault/, build, init
+./manage.sh up --dev       # foreground
+./manage.sh start --dev    # background
+./manage.sh build --dev    # after code changes
+./manage.sh restart --dev
 ```
-
-Foreground logs: `./manage.sh up` · Stop: `./manage.sh down` · Help: `./manage.sh --help`
 
 Notes live in **`./vault/docs/`** (bind-mounted). Edit on the host or use the web UI (**New note** / **New folder** in the sidebar).
 
@@ -88,7 +81,7 @@ Notes live in **`./vault/docs/`** (bind-mounted). Edit on the host or use the we
 ./manage.sh kb -V /vault search tag:docker
 ```
 
-Set `VAULT_PATH` or `KBOS_PORT` in `.env` (created by `setup`).
+Set `VAULT_PATH` or `KBOS_PORT` in `.env` (created by `setup --dev`).
 
 ## Multi-instance sync (laptop ↔ server)
 
@@ -107,12 +100,14 @@ The web app reads/writes markdown under `/vault/docs`. A **Go HTTP API** will re
 ## Project layout
 
 ```
-manage.sh            Docker workflow helper
-cmd/kb/              Go CLI
-web/                 Next.js UI
-vault/               your notes (bind-mounted, gitignored)
-docs/vault-sync.md   laptop↔server vault sync runbook
-docker-compose.sync.yml  optional Syncthing sibling
+manage.sh               Docker workflow helper
+cmd/kb/                 Go CLI
+web/                    Next.js UI
+vault/                  your notes (bind-mounted, gitignored)
+docs/vault-sync.md      laptop↔server vault sync runbook
+docker-compose.yml      production (default) — pull ghcr image
+docker-compose.dev.yml  local — build from source (--dev)
+docker-compose.sync.yml optional Syncthing sibling
 ```
 
 ## Design rules

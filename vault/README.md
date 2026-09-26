@@ -2,7 +2,7 @@
 
 This folder is **bind-mounted** into Docker at `/vault`. Edit markdown here with any editor; the web UI reads the same files.
 
-On first `./manage.sh setup` (or `up`), the `init` service creates:
+On first `./manage.sh setup --dev` (or `up --dev`), the `init` service creates:
 
 ```
 vault/

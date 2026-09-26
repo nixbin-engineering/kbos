@@ -1,6 +1,7 @@
 # Optional Syncthing sibling — shares VAULT_PATH with KBOS.
 # Does not start with default ./manage.sh start; use:
 #   ./manage.sh sync:up
+#   ./manage.sh sync:up
 #   docker compose --env-file .env -f docker-compose.yml -f docker-compose.sync.yml up -d
 #
 # Open http://localhost:${SYNCTHING_UI_PORT:-8384} and share folder path /vault

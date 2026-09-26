@@ -1,26 +1,31 @@
-# KBOS — production compose using pre-built image from ghcr.io
-# See README.md for full setup instructions.
-#
-# Usage:
-#   docker compose -f docker-compose.prod.yml up -d
-#   docker compose -f docker-compose.prod.yml pull   # upgrade to latest
+# KBOS — local/dev: build images from source.
+#   ./manage.sh --dev setup
+#   ./manage.sh up --dev
+# Production (default): docker-compose.yml / ./manage.sh start
+# VAULT_PATH  → main vault (mounted at /vault)
+# VAULTS_BASE → directory housing all vaults (mounted at /vaults)
 
 services:
   init:
-    image: ghcr.io/nixbin-engineering/kbos:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     volumes:
       - ${VAULT_PATH:-./vault}:/vault
       - ${VAULTS_BASE:-./vaults}:/vaults
+      - ./scripts/init-vault.sh:/scripts/init-vault.sh:ro
     entrypoint: ["/bin/sh", "/scripts/init-vault.sh"]
     restart: "no"
 
   web:
-    image: ghcr.io/nixbin-engineering/kbos:latest
+    build:
+      context: .
+      dockerfile: web/Dockerfile
     container_name: kbos
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
-    ports:
-      - "${KBOS_PORT:-3000}:3000"
+    #ports:
+    #  - "${KBOS_PORT:-3000}:3000"
     networks:
       - proxy
     # Reach host LLM/MLX (Ollama, etc.) via host.docker.internal — required on Linux;
@@ -30,7 +35,6 @@ services:
     environment:
       VAULT_PATH: /vault
       VAULTS_BASE: /vaults
-      NODE_ENV: production
     volumes:
       - ${VAULT_PATH:-./vault}:/vault
       - ${VAULTS_BASE:-./vaults}:/vaults
@@ -48,7 +52,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-
 networks:
   proxy:
     name: proxy
