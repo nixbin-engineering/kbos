@@ -1,13 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, CheckCircle2, Circle, Columns2, Download, Eye, FilePenLine, FileText, ImagePlus, Link2, Loader2, Lock, Save } from "lucide-react";
+import { BookOpen, CheckCircle2, Circle, CloudOff, Columns2, Download, Eye, FilePenLine, FileText, ImagePlus, Link2, Loader2, Lock, Save } from "lucide-react";
 import matter from "gray-matter";
 import type { DocResponse, FolderIndex, TreeNode } from "@/lib/types";
 import { mergeLiveFolderIndex } from "@/lib/folder-index-live";
 import { mergeTags } from "@/lib/tags";
 import { extractToc, findHeadingLine } from "@/lib/toc";
 import { cn } from "@/lib/utils";
+import {
+  isPathOfflineAvailable,
+  loadDocOffline,
+  maybeCacheOnlineDoc,
+  resolveConflictKeepLocal,
+  resolveConflictTakeServer,
+  saveDocOffline,
+  subscribeSync,
+} from "@/lib/offline-sync";
 import { BreadcrumbNav } from "./breadcrumb-nav";
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from "./codemirror-editor";
 import { FolderContentsPanel } from "./folder-contents";
@@ -29,8 +38,13 @@ type Props = {
   onAskAi?: (prompt?: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onRegisterSave?: (save: (() => Promise<boolean>) | null) => void;
+  /** Call before intentional path remap (move/rename) so leave-flush does not PUT to the old path. */
+  onRegisterPathRemap?: (mark: (() => void) | null) => void;
   scrollRef?: React.RefObject<HTMLDivElement | null>;
 };
+
+/** Typing debounce cap so edits feel instantly persisted. */
+const SAVE_DEBOUNCE_MAX_MS = 500;
 
 function wordCount(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
@@ -184,6 +198,7 @@ export function DocWorkspace({
   onAskAi,
   onDirtyChange,
   onRegisterSave,
+  onRegisterPathRemap,
   scrollRef,
 }: Props) {
   const [doc, setDoc] = useState<DocResponse | null>(null);
@@ -196,7 +211,7 @@ export function DocWorkspace({
   const [diskChanged, setDiskChanged] = useState(false);
   const [diskContent, setDiskContent] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
-  const [saveState, setSaveState] = useState<"idle" | "pending" | "saved">("idle");
+  const [saveState, setSaveState] = useState<"idle" | "pending" | "saved" | "offline">("idle");
   const [error, setError] = useState<string | null>(null);
   const [folderIndex, setFolderIndex] = useState<FolderIndex | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -214,13 +229,18 @@ export function DocWorkspace({
     if (scrollRef) (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
   }, [scrollRef]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const saveRef = useRef<() => Promise<boolean>>(undefined);
+  const saveRef = useRef<(opts?: { force?: boolean }) => Promise<boolean>>(undefined);
   const pathRef = useRef(path);
   const rawRef = useRef(raw);
   const dirtyRef = useRef(dirty);
   const encryptedRef = useRef(!!doc?.encrypted);
   const onSavedRef = useRef(onSaved);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const baseMtimeRef = useRef<number | null>(null);
+  const suppressLeaveFlushRef = useRef(false);
+  const ignoreRemoteUntilRef = useRef(0);
+  const saveInflightRef = useRef<Promise<boolean> | null>(null);
+  const saveQueuedRef = useRef<{ content: string; force?: boolean } | null>(null);
 
   pathRef.current = path;
   rawRef.current = raw;
@@ -254,33 +274,69 @@ export function DocWorkspace({
     onLiveTagsChange?.(path ? liveTags : []);
   }, [path, liveTags, onLiveTagsChange]);
 
+  const applyLoadedDoc = useCallback((d: DocResponse) => {
+    setDoc(d);
+    setRaw(d.raw);
+    baseMtimeRef.current = typeof d.mtimeMs === "number" ? d.mtimeMs : null;
+    setDirty(false);
+    dirtyRef.current = false;
+    setDiskChanged(false);
+    setDiskContent(null);
+    setShowDiff(false);
+    setSaveState("idle");
+    if (d.encrypted) setNeedsUnlock(true);
+    else setNeedsUnlock(false);
+  }, []);
+
   const loadDoc = useCallback(async (docPath: string, opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     setError(null);
     setNeedsUnlock(false);
     try {
-      const r = await fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`);
-      if (r.status === 423) {
+      const offline = typeof navigator !== "undefined" && !navigator.onLine;
+      if (!offline) {
+        try {
+          const r = await fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`);
+          if (r.status === 423) {
+            setNeedsUnlock(true);
+            setDoc(null);
+            setRaw("");
+            baseMtimeRef.current = null;
+            return;
+          }
+          if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+          const d = (await r.json()) as DocResponse;
+          applyLoadedDoc(d);
+          void maybeCacheOnlineDoc(d);
+          return;
+        } catch (netErr) {
+          // Fall through to offline cache
+          if (!(await isPathOfflineAvailable(docPath))) throw netErr;
+        }
+      }
+
+      const cached = await loadDocOffline(docPath);
+      if (!cached) {
+        throw new Error(
+          offline
+            ? "Not available offline — pin this note or folder while online"
+            : "Failed to load note",
+        );
+      }
+      if (cached.encrypted) {
         setNeedsUnlock(true);
-        setDoc(null);
+        setDoc(cached);
         setRaw("");
+        baseMtimeRef.current = null;
         return;
       }
-      if (!r.ok) throw new Error((await r.json()).error || r.statusText);
-      const d = (await r.json()) as DocResponse;
-      setDoc(d);
-      setRaw(d.raw);
-      setDirty(false);
-      setDiskChanged(false);
-      setDiskContent(null);
-      setShowDiff(false);
-      setSaveState("idle");
+      applyLoadedDoc(cached);
     } catch (e) {
-      setError(String(e));
+      setError(String(e).replace(/^Error:\s*/, ""));
     } finally {
       if (!opts?.silent) setLoading(false);
     }
-  }, []);
+  }, [applyLoadedDoc]);
 
   const unlockAndLoad = useCallback(async () => {
     if (!path || !unlockPass) return;
@@ -342,6 +398,7 @@ export function DocWorkspace({
       setDiskChanged(false);
       setDirty(false);
       dirtyRef.current = false;
+      baseMtimeRef.current = null;
       return;
     }
 
@@ -353,6 +410,15 @@ export function DocWorkspace({
     void loadDoc(trackedPath);
 
     return () => {
+      // Intentional move/rename: path remapped — do not resurrect the old file.
+      if (suppressLeaveFlushRef.current) {
+        suppressLeaveFlushRef.current = false;
+        if (autosaveTimerRef.current) {
+          clearTimeout(autosaveTimerRef.current);
+          autosaveTimerRef.current = null;
+        }
+        return;
+      }
       // Flush pending edits for this path before leaving (navigate / unmount).
       if (!dirtyRef.current || encryptedRef.current) return;
       const content = rawRef.current;
@@ -361,10 +427,11 @@ export function DocWorkspace({
         clearTimeout(autosaveTimerRef.current);
         autosaveTimerRef.current = null;
       }
+      // Backup flush: force so a soft conflict cannot drop navigation edits.
       void fetch(`/api/docs/${trackedPath.split("/").map(encodeURIComponent).join("/")}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw: content }),
+        body: JSON.stringify({ raw: content, force: true }),
         keepalive: true,
       }).then((r) => {
         if (r.ok) onSavedRef.current?.();
@@ -374,59 +441,180 @@ export function DocWorkspace({
 
   useEffect(() => {
     if (!path || !docRemoteRev || docRemoteRev.path !== path) return;
+    // Ignore self-notify from our own recent save
+    if (Date.now() < ignoreRemoteUntilRef.current) return;
     if (dirty) {
       setDiskChanged(true);
-      // Pre-fetch disk version for diff
       fetch(`/api/docs/${path.split("/").map(encodeURIComponent).join("/")}`)
-        .then((r) => r.ok ? r.json() : null)
-        .then((d) => d?.raw != null && setDiskContent(d.raw))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.raw != null) setDiskContent(d.raw);
+          if (typeof d?.mtimeMs === "number") {
+            /* keep baseMtime as our last known; disk is ahead */
+          }
+        })
         .catch(() => undefined);
       return;
     }
     void loadDoc(path, { silent: true });
   }, [docRemoteRev, path, dirty, loadDoc]);
 
+  // Surface sync-queue conflicts for the open note
+  useEffect(() => {
+    return subscribeSync((s) => {
+      if (!path || !s.conflict || s.conflict.path !== path) return;
+      setDiskChanged(true);
+      if (s.conflict.raw != null) setDiskContent(s.conflict.raw);
+    });
+  }, [path]);
+
   useEffect(() => {
     if (isIndexPage) loadFolderIndex();
   }, [tree, isIndexPage, loadFolderIndex]);
 
-  const putDoc = useCallback(async (docPath: string, content: string, opts?: { keepalive?: boolean }) => {
-    const r = await fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw: content }),
-      keepalive: opts?.keepalive,
-    });
-    if (!r.ok) throw new Error((await r.json()).error || r.statusText);
-    if (opts?.keepalive) return null;
-    return (await r.json()) as DocResponse;
-  }, []);
+  const putDoc = useCallback(
+    async (
+      docPath: string,
+      content: string,
+      opts?: { keepalive?: boolean; force?: boolean; expectedMtime?: number | null },
+    ): Promise<DocResponse | null | "conflict" | "offline"> => {
+      const body: { raw: string; expectedMtime?: number; force?: boolean } = { raw: content };
+      if (opts?.force) body.force = true;
+      else if (opts?.expectedMtime != null) body.expectedMtime = opts.expectedMtime;
+      else if (baseMtimeRef.current != null) body.expectedMtime = baseMtimeRef.current;
 
-  const save = useCallback(async (): Promise<boolean> => {
-    if (!path || !dirty || doc?.encrypted) return true;
-    setSaving(true);
-    setError(null);
-    try {
-      const d = await putDoc(path, raw);
-      if (!d) return false;
-      setDoc(d);
-      setRaw(d.raw);
-      setDirty(false);
-      dirtyRef.current = false;
-      setSaveState("saved");
-      onSaved?.();
-      if (isIndexPage) loadFolderIndex();
-      return true;
-    } catch (e) {
-      setError(String(e));
-      setSaveState("idle");
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, [path, raw, dirty, doc?.encrypted, onSaved, isIndexPage, loadFolderIndex, putDoc]);
+      const expected =
+        opts?.expectedMtime != null ? opts.expectedMtime : baseMtimeRef.current;
+
+      const tryOffline = async (): Promise<"offline"> => {
+        const available = await isPathOfflineAvailable(docPath);
+        if (!available) throw new Error("Not available offline — pin this note while online");
+        await saveDocOffline(docPath, content, expected, opts?.force);
+        return "offline";
+      };
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return tryOffline();
+      }
+
+      try {
+        const r = await fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          keepalive: opts?.keepalive,
+        });
+        if (r.status === 409) {
+          const data = await r.json().catch(() => ({}));
+          setDiskChanged(true);
+          if (typeof data.raw === "string") setDiskContent(data.raw);
+          return "conflict";
+        }
+        if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+        if (opts?.keepalive) return null;
+        const doc = (await r.json()) as DocResponse;
+        void maybeCacheOnlineDoc(doc);
+        return doc;
+      } catch (e) {
+        if (await isPathOfflineAvailable(docPath)) return tryOffline();
+        throw e;
+      }
+    },
+    [],
+  );
+
+  const save = useCallback(
+    async (opts?: { force?: boolean }): Promise<boolean> => {
+      const docPath = pathRef.current;
+      if (!docPath || encryptedRef.current) return true;
+      const force = opts?.force === true;
+      if (!force && !dirtyRef.current && !saveQueuedRef.current) return true;
+
+      if (saveInflightRef.current) {
+        saveQueuedRef.current = { content: rawRef.current, force };
+        return saveInflightRef.current;
+      }
+
+      const run = async (): Promise<boolean> => {
+        setSaving(true);
+        setError(null);
+        let ok = true;
+        try {
+          type SaveReq = { content: string; force?: boolean };
+          let next: SaveReq | null = { content: rawRef.current, force };
+          while (next) {
+            const req: SaveReq = next;
+            saveQueuedRef.current = null;
+            const result = await putDoc(docPath, req.content, { force: req.force });
+            if (result === "conflict") {
+              setSaveState("idle");
+              ok = false;
+              break;
+            }
+            if (result === "offline") {
+              if (rawRef.current === req.content) {
+                setDirty(false);
+                dirtyRef.current = false;
+                setSaveState("offline");
+              } else {
+                setSaveState("pending");
+              }
+              onSavedRef.current?.();
+              next = saveQueuedRef.current;
+              if (!next && dirtyRef.current && rawRef.current !== req.content) {
+                next = { content: rawRef.current, force: req.force };
+              }
+              continue;
+            }
+            if (!result) {
+              ok = false;
+              break;
+            }
+            setDoc(result);
+            if (typeof result.mtimeMs === "number") baseMtimeRef.current = result.mtimeMs;
+            ignoreRemoteUntilRef.current = Date.now() + 1500;
+            if (rawRef.current === req.content) {
+              setRaw(result.raw);
+              setDirty(false);
+              dirtyRef.current = false;
+              setDiskChanged(false);
+              setDiskContent(null);
+              setShowDiff(false);
+              setSaveState("saved");
+            } else {
+              setSaveState("pending");
+            }
+            onSavedRef.current?.();
+            if (isIndexPage) void loadFolderIndex();
+
+            next = saveQueuedRef.current;
+            if (!next && dirtyRef.current && rawRef.current !== req.content) {
+              next = { content: rawRef.current, force: req.force };
+            }
+          }
+        } catch (e) {
+          setError(String(e));
+          setSaveState("idle");
+          ok = false;
+        } finally {
+          setSaving(false);
+          saveInflightRef.current = null;
+        }
+        return ok;
+      };
+
+      const p = run();
+      saveInflightRef.current = p;
+      return p;
+    },
+    [putDoc, isIndexPage, loadFolderIndex],
+  );
 
   saveRef.current = save;
+
+  const markPathRemap = useCallback(() => {
+    suppressLeaveFlushRef.current = true;
+  }, []);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -440,19 +628,29 @@ export function DocWorkspace({
   }, [onDirtyChange]);
 
   useEffect(() => {
-    onRegisterSave?.(save);
+    const bound = () => save();
+    onRegisterSave?.(bound);
     return () => onRegisterSave?.(null);
   }, [save, onRegisterSave]);
+
+  useEffect(() => {
+    onRegisterPathRemap?.(markPathRemap);
+    return () => onRegisterPathRemap?.(null);
+  }, [markPathRemap, onRegisterPathRemap]);
 
   /** Keepalive write for unload — does not clear dirty (so beforeunload can still warn). */
   const keepaliveSave = useCallback(() => {
     const docPath = pathRef.current;
     if (!docPath || !dirtyRef.current || encryptedRef.current) return;
     const content = rawRef.current;
+    const body: { raw: string; expectedMtime?: number; force?: boolean } = { raw: content };
+    if (baseMtimeRef.current != null) body.expectedMtime = baseMtimeRef.current;
+    // Unload must not lose edits to a soft conflict — force overwrite.
+    body.force = true;
     void fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw: content }),
+      body: JSON.stringify(body),
       keepalive: true,
     }).then((r) => {
       if (r.ok) onSavedRef.current?.();
@@ -462,19 +660,21 @@ export function DocWorkspace({
   useEffect(() => {
     // dirtyRef may already be false if a path-leave flush just ran — don't
     // schedule an autosave of the previous buffer into the new path.
-    if (!dirty || !path || !dirtyRef.current) return;
+    // Pause while a conflict banner is up so we don't 409-loop.
+    if (!dirty || !path || !dirtyRef.current || diskChanged) return;
     setSaveState("pending");
+    const debounceMs = Math.min(Math.max(1, autosaveSeconds) * 1000, SAVE_DEBOUNCE_MAX_MS);
     autosaveTimerRef.current = setTimeout(() => {
       autosaveTimerRef.current = null;
       void saveRef.current?.();
-    }, autosaveSeconds * 1000);
+    }, debounceMs);
     return () => {
       if (autosaveTimerRef.current) {
         clearTimeout(autosaveTimerRef.current);
         autosaveTimerRef.current = null;
       }
     };
-  }, [raw, dirty, path, autosaveSeconds]);
+  }, [raw, dirty, path, autosaveSeconds, diskChanged]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -767,6 +967,7 @@ export function DocWorkspace({
           {saving && <span title="Saving…"><Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--muted)]" /></span>}
           {!saving && dirty && <span title="Unsaved changes"><Circle className="h-2.5 w-2.5 fill-amber-400 text-amber-400" /></span>}
           {!saving && !dirty && saveState === "saved" && <span title="Saved"><CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /></span>}
+          {!saving && !dirty && saveState === "offline" && <span title="Saved offline — will sync when online"><CloudOff className="h-3.5 w-3.5 text-sky-500" /></span>}
           {path && (
             <button
               type="button"
@@ -904,14 +1105,40 @@ export function DocWorkspace({
               )}
               <button
                 type="button"
-                onClick={() => { setShowDiff(false); path && void loadDoc(path); }}
+                onClick={() => {
+                  setShowDiff(false);
+                  if (!path) return;
+                  void (async () => {
+                    const server = await resolveConflictTakeServer(path);
+                    if (server && !server.encrypted) applyLoadedDoc(server);
+                    else void loadDoc(path);
+                  })();
+                }}
                 className="rounded-md border border-amber-600/40 bg-amber-500/20 px-2 py-1 text-xs hover:bg-amber-500/30"
               >
                 Reload from disk
               </button>
               <button
                 type="button"
-                onClick={() => { setDiskChanged(false); setDiskContent(null); setShowDiff(false); }}
+                onClick={() => {
+                  setDiskChanged(false);
+                  setDiskContent(null);
+                  setShowDiff(false);
+                  setDirty(true);
+                  dirtyRef.current = true;
+                  void (async () => {
+                    if (path) {
+                      const ok = await resolveConflictKeepLocal(path, rawRef.current);
+                      if (ok) {
+                        setSaveState(navigator.onLine ? "saved" : "offline");
+                        setDirty(false);
+                        dirtyRef.current = false;
+                        return;
+                      }
+                    }
+                    void saveRef.current?.({ force: true });
+                  })();
+                }}
                 className="rounded-md border border-amber-600/40 px-2 py-1 text-xs hover:bg-amber-500/20"
               >
                 Keep my edits
@@ -982,6 +1209,7 @@ export function DocWorkspace({
             {saving && <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Saving…</span>}
             {!saving && dirty && <span className="text-amber-500">Unsaved changes</span>}
             {!saving && !dirty && saveState === "saved" && <span className="text-emerald-600 dark:text-emerald-400">Saved</span>}
+            {!saving && !dirty && saveState === "offline" && <span className="text-sky-600 dark:text-sky-400">Saved offline</span>}
             {doc?.encrypted && <span className="text-amber-600 dark:text-amber-400">· encrypted</span>}
           </div>
         </div>

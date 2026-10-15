@@ -39,10 +39,20 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const newRel: string = String(body.newPath ?? "").trim().replace(/\/+$/, "");
 
   try {
+    if (!newRel) {
+      return NextResponse.json({ error: "destination required" }, { status: 400 });
+    }
+    // Reject moving a folder into itself or a descendant
+    if (newRel === rel || newRel.startsWith(`${rel}/`)) {
+      return NextResponse.json({ error: "cannot move folder into itself" }, { status: 400 });
+    }
     const docs = docsDir();
-    const srcAbs = path.join(docs, rel);
-    const dstAbs = path.join(docs, newRel);
-    if (!srcAbs.startsWith(docs) || !dstAbs.startsWith(docs)) {
+    const srcAbs = path.resolve(docs, rel);
+    const dstAbs = path.resolve(docs, newRel);
+    if (
+      (srcAbs !== docs && !srcAbs.startsWith(docs + path.sep)) ||
+      (dstAbs !== docs && !dstAbs.startsWith(docs + path.sep))
+    ) {
       return NextResponse.json({ error: "path outside vault" }, { status: 400 });
     }
     if (srcAbs === dstAbs) return NextResponse.json({ error: "same path" }, { status: 400 });

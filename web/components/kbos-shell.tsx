@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, BookOpen, Bot, CheckSquare, FilePlus, GitBranch, KeyRound, LayoutDashboard, Link2, Menu, RefreshCw, Settings, Wrench } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, Bot, CheckSquare, CloudOff, CloudUpload, FilePlus, GitBranch, KeyRound, LayoutDashboard, Link2, Loader2, Menu, RefreshCw, Settings, Wrench } from "lucide-react";
 import type { Tab, TreeNode } from "@/lib/types";
 import { useVaultEvents } from "@/lib/use-vault-events";
+import { useOfflineSync } from "@/lib/use-offline-sync";
+import { getTreeSnapshot, setTreeSnapshot } from "@/lib/offline-store";
 import { createLocalFile, forgetLocalFileHandle, newLocalFileId, openLocalFile, registerLocalFileHandle } from "@/lib/local-file";
 import { AdminSettingsButton } from "./admin-settings";
 import { TabBar } from "./tab-bar";
@@ -72,6 +74,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
   const scrollSyncing = useRef(false);
   const editorDirtyRef = useRef(false);
   const editorSaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  const pathRemapRef = useRef<(() => void) | null>(null);
   const [tagQuery, setTagQuery] = useState<string | null>(null);
 
   const selected = tabs[activeTabIdx]?.path ?? null;
@@ -173,6 +176,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
       const treeData = await r.json();
       setTree(treeData);
       setReady(true);
+      void setTreeSnapshot(treeData);
       // On first load: fetch settings to get configured start page, then open it
       if (!initialNavDone.current) {
         initialNavDone.current = true;
@@ -213,10 +217,32 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
         }
       }
     } catch (e) {
+      // Offline / network failure: use cached tree from offline pins if present
+      try {
+        const cached = await getTreeSnapshot();
+        if (cached) {
+          setTree(cached);
+          setReady(true);
+          setError(null);
+          if (!initialNavDone.current) initialNavDone.current = true;
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
       setError(String(e));
       setReady(false);
     }
   }, []);
+
+  const {
+    sync: offlineSync,
+    pins: offlinePins,
+    pin: pinOffline,
+    unpin: unpinOffline,
+    offline: networkOffline,
+    drain: drainOfflineQueue,
+  } = useOfflineSync();
 
   useEffect(() => {
     checkAuth().then((ok) => {
@@ -265,6 +291,16 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
 
   const onRegisterEditorSave = useCallback((save: (() => Promise<boolean>) | null) => {
     editorSaveRef.current = save;
+  }, []);
+
+  const onRegisterPathRemap = useCallback((mark: (() => void) | null) => {
+    pathRemapRef.current = mark;
+  }, []);
+
+  /** Flush editor before move/rename so the on-disk file is current. */
+  const flushEditorBeforeMove = useCallback(async (_movingPath: string) => {
+    const save = editorSaveRef.current;
+    if (save) await save();
   }, []);
 
   const [leaveDialog, setLeaveDialog] = useState<{ open: boolean; saving: boolean; error: string | null }>({
@@ -567,6 +603,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
           onLiveTagsChange={opts?.isSplit ? undefined : setLiveDocTags}
           onDirtyChange={opts?.isSplit ? undefined : onEditorDirtyChange}
           onRegisterSave={opts?.isSplit ? undefined : onRegisterEditorSave}
+          onRegisterPathRemap={opts?.isSplit ? undefined : onRegisterPathRemap}
           onAskAi={(prompt) =>
             openAiChat({ scope: panePath ? "document" : paneFolderView !== null ? "folder" : "vault", prompt })
           }
@@ -574,7 +611,7 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
         />
       );
     },
-    [openDoc, openDocInSplit, openFolder, tree, tagRefreshKey, autosaveSeconds, docRemoteRev, onDocumentSaved, createFolderIndex, openAiChat, onEditorDirtyChange, onRegisterEditorSave],
+    [openDoc, openDocInSplit, openFolder, tree, tagRefreshKey, autosaveSeconds, docRemoteRev, onDocumentSaved, createFolderIndex, openAiChat, onEditorDirtyChange, onRegisterEditorSave, onRegisterPathRemap],
   );
 
   const toolbarBtn = () =>
@@ -748,6 +785,43 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
             </button>
           </Tooltip>
           <div className="mx-1 hidden h-5 w-px bg-[var(--border)] md:block" />
+          {(networkOffline || offlineSync.pending > 0 || offlineSync.status === "syncing" || offlineSync.status === "auth-required" || offlineSync.pinning) && (
+            <Tooltip
+              content={
+                offlineSync.pinning
+                  ? `Downloading offline copy… ${offlineSync.pinProgress?.done ?? 0}/${offlineSync.pinProgress?.total ?? 0}`
+                  : offlineSync.status === "auth-required"
+                    ? "Sign in again to sync offline edits"
+                    : networkOffline
+                      ? offlineSync.pending > 0
+                        ? `Offline — ${offlineSync.pending} change(s) waiting to sync`
+                        : "Offline"
+                      : offlineSync.status === "syncing"
+                        ? "Syncing offline changes…"
+                        : `${offlineSync.pending} offline change(s) — click to sync`
+              }
+              side="bottom"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (!networkOffline && offlineSync.pending > 0) void drainOfflineQueue();
+                }}
+                className={`${toolbarBtn()} hidden md:flex gap-1 text-xs`}
+              >
+                {offlineSync.pinning || offlineSync.status === "syncing" ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-sky-500" />
+                ) : networkOffline ? (
+                  <CloudOff className="h-4 w-4 text-sky-500" />
+                ) : (
+                  <CloudUpload className="h-4 w-4 text-sky-500" />
+                )}
+                {offlineSync.pending > 0 && (
+                  <span className="tabular-nums text-sky-600 dark:text-sky-400">{offlineSync.pending}</span>
+                )}
+              </button>
+            </Tooltip>
+          )}
           <Tooltip content="Refresh vault" side="bottom">
             <button type="button" onClick={loadTree} className={`${toolbarBtn()} hidden md:flex`}>
               <RefreshCw className="h-4 w-4" />
@@ -812,11 +886,47 @@ export function KbosShell({ helpTopics }: KbosShellProps) {
               );
               if (splitPath === path || splitPath?.startsWith(`${path}/`)) setSplitPath(null);
             }}
+            onMoved={(oldPath, newPath) => {
+              const remap = (p: string | null | undefined) => {
+                if (!p) return p ?? null;
+                if (p === oldPath) return newPath;
+                if (p.startsWith(`${oldPath}/`)) return `${newPath}${p.slice(oldPath.length)}`;
+                return p;
+              };
+              setTabs((prev) => {
+                const active = prev[activeTabIdx];
+                const affectsActive =
+                  (active?.path != null &&
+                    (active.path === oldPath || active.path.startsWith(`${oldPath}/`))) ||
+                  (active?.folderView != null &&
+                    (active.folderView === oldPath ||
+                      active.folderView.startsWith(`${oldPath}/`)));
+                // Suppress leave-flush ghost PUT only when this editor path remaps.
+                if (affectsActive) pathRemapRef.current?.();
+                return prev.map((t) => ({
+                  ...t,
+                  path: remap(t.path),
+                  folderView: remap(t.folderView),
+                }));
+              });
+              setSplitPath((prev) => remap(prev));
+            }}
+            onBeforeMove={flushEditorBeforeMove}
             onTreeRefresh={loadTree}
             onOpenDoc={openDoc}
             onOpenDocNewTab={openDocNewTab}
             onOpenDocInSplit={openDocInSplit}
             isAdmin={userRole === "admin"}
+            offlinePins={offlinePins}
+            onOfflinePin={async (path, type) => {
+              const result = await pinOffline(path, type, tree);
+              if (!result.ok) throw new Error(result.error || "Failed to pin offline");
+            }}
+            onOfflineUnpin={async (path) => {
+              await unpinOffline(path);
+            }}
+            networkOffline={networkOffline}
+            structuralOpsDisabled={networkOffline}
           />
         </aside>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--background)]">

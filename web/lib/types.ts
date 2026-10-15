@@ -24,6 +24,8 @@ export type DocResponse = {
   body: string;
   raw: string;
   encrypted?: boolean;
+  /** Filesystem mtime in ms; used for optimistic concurrency on save. */
+  mtimeMs?: number;
 };
 
 export type SearchHit = {

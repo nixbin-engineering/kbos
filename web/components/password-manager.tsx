@@ -1,10 +1,27 @@
 "use client";
 
 import {
-  Check, ChevronRight, Copy, Eye, EyeOff, Globe, KeyRound, Lock, Pencil, Plus, RefreshCw, Share2, ShieldCheck, Trash2, Unlock, X,
+  Check, ChevronRight, CloudOff, CloudDownload, Copy, Eye, EyeOff, Globe, KeyRound, Lock, Pencil, Plus, RefreshCw, Share2, ShieldCheck, Trash2, Unlock, X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import {
+  type OfflinePasswordEntry,
+  clearStoredPassphrase,
+  deleteEntryOffline,
+  disablePasswordOffline,
+  downloadPasswordsForOffline,
+  drainPasswordPending,
+  getOfflineEntry,
+  getPasswordSessionEntries,
+  hasPasswordOfflineVault,
+  isPasswordOfflineEnabled,
+  isPasswordSessionUnlocked,
+  newOfflinePasswordId,
+  pwdPendingCount,
+  saveEntryOffline,
+  unlockPasswordOffline,
+} from "@/lib/offline-passwords";
 
 type EntryMeta = {
   id: string;
@@ -137,29 +154,61 @@ function TotpDisplay({ secret }: { secret: string }) {
   );
 }
 
-function UnlockScreen({ onUnlocked, inline }: { onUnlocked: () => void; inline?: boolean }) {
+function UnlockScreen({
+  onUnlocked,
+  inline,
+}: {
+  onUnlocked: (passphrase: string, mode: "online" | "offline") => void;
+  inline?: boolean;
+}) {
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasOffline, setHasOffline] = useState(false);
+
+  useEffect(() => {
+    void hasPasswordOfflineVault().then(setHasOffline);
+  }, []);
 
   const unlock = async () => {
     if (!pass) return;
     setBusy(true);
     setError(null);
     try {
-      const r = await fetch("/api/encrypt/unlock", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ passphrase: pass }),
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.error || `HTTP ${r.status}`);
+      const offline = typeof navigator !== "undefined" && !navigator.onLine;
+      if (offline) {
+        await unlockPasswordOffline(pass);
+        const pp = pass;
+        setPass("");
+        onUnlocked(pp, "offline");
+        return;
       }
-      setPass("");
-      onUnlocked();
+      try {
+        const r = await fetch("/api/encrypt/unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ passphrase: pass }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error || `HTTP ${r.status}`);
+        }
+        const pp = pass;
+        setPass("");
+        onUnlocked(pp, "online");
+        return;
+      } catch (netErr) {
+        if (hasOffline || (await hasPasswordOfflineVault())) {
+          await unlockPasswordOffline(pass);
+          const pp = pass;
+          setPass("");
+          onUnlocked(pp, "offline");
+          return;
+        }
+        throw netErr;
+      }
     } catch (e) {
-      setError(String(e));
+      setError(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
     }
@@ -195,6 +244,11 @@ function UnlockScreen({ onUnlocked, inline }: { onUnlocked: () => void; inline?:
       <div className="text-center">
         <h2 className="mb-1 font-semibold">Password vault locked</h2>
         <p className="text-sm text-[var(--muted)]">Enter your vault passphrase to unlock and access stored credentials</p>
+        {hasOffline && (
+          <p className="mt-1 inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400">
+            <CloudOff className="h-3 w-3" /> Offline copy available
+          </p>
+        )}
       </div>
       <div className="w-full max-w-xs space-y-2">
         <input
@@ -235,9 +289,29 @@ export function PasswordManager() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [offlineMode, setOfflineMode] = useState(false);
+  const [offlineEnabled, setOfflineEnabled] = useState(false);
+  const [pendingPwd, setPendingPwd] = useState(0);
+  const [pinningOffline, setPinningOffline] = useState(false);
+  const lastPassphraseRef = useRef<string | null>(null);
 
   type GroupItem = { id: string; name: string };
   const [availableGroups, setAvailableGroups] = useState<GroupItem[]>([]);
+
+  const refreshPending = useCallback(async () => {
+    try {
+      setPendingPwd(await pwdPendingCount());
+    } catch {
+      setPendingPwd(0);
+    }
+  }, []);
+
+  const loadEntriesFromSession = useCallback(() => {
+    const list = getPasswordSessionEntries();
+    setEntries(
+      list.map(({ password: _p, totp_secret: _t, ...meta }) => meta),
+    );
+  }, []);
 
   // Check lock status via the unlock status endpoint (not the password list)
   const checkLockStatus = useCallback(async () => {
@@ -252,23 +326,49 @@ export function PasswordManager() {
   }, []);
 
   const loadEntries = useCallback(async () => {
-    const r = await fetch("/api/passwords");
-    if (r.ok) {
-      const data = await r.json();
-      setEntries(data.entries || []);
+    if (offlineMode || (typeof navigator !== "undefined" && !navigator.onLine && isPasswordSessionUnlocked())) {
+      loadEntriesFromSession();
+      return;
     }
-  }, []);
+    try {
+      const r = await fetch("/api/passwords");
+      if (r.ok) {
+        const data = await r.json();
+        setEntries(data.entries || []);
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+    if (isPasswordSessionUnlocked()) {
+      setOfflineMode(true);
+      loadEntriesFromSession();
+    }
+  }, [loadEntriesFromSession, offlineMode]);
 
   // On mount: check if already unlocked (e.g. after page refresh with active session)
   useEffect(() => {
     (async () => {
       setCheckingLock(true);
+      setOfflineEnabled(await isPasswordOfflineEnabled());
+      await refreshPending();
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        if (isPasswordSessionUnlocked()) {
+          setLocked(false);
+          setOfflineMode(true);
+          loadEntriesFromSession();
+        } else {
+          setLocked(true);
+        }
+        setCheckingLock(false);
+        return;
+      }
       const unlocked = await checkLockStatus();
       setLocked(!unlocked);
       if (unlocked) await loadEntries();
       setCheckingLock(false);
     })();
-  }, [checkLockStatus, loadEntries]);
+  }, [checkLockStatus, loadEntries, loadEntriesFromSession, refreshPending]);
 
   useEffect(() => {
     fetch("/api/admin/groups").then((r) => r.ok ? r.json() : null).then((d) => {
@@ -276,20 +376,88 @@ export function PasswordManager() {
     }).catch(() => {});
   }, []);
 
-  const handleUnlocked = useCallback(async () => {
+  useEffect(() => {
+    const onOnline = () => {
+      void (async () => {
+        const result = await drainPasswordPending();
+        await refreshPending();
+        if (result.locked) setSessionExpired(true);
+        if (!result.authRequired && !result.locked && navigator.onLine) {
+          setOfflineMode(false);
+          await loadEntries();
+        }
+      })();
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [loadEntries, refreshPending]);
+
+  const handleUnlocked = useCallback(async (passphrase: string, mode: "online" | "offline") => {
+    lastPassphraseRef.current = passphrase;
     setLocked(false);
     setSessionExpired(false);
-    await loadEntries();
-  }, [loadEntries]);
+    setOfflineMode(mode === "offline");
+    if (mode === "offline") {
+      loadEntriesFromSession();
+    } else {
+      await loadEntries();
+      // Keep offline vault warm if already enabled
+      if (await isPasswordOfflineEnabled()) {
+        void downloadPasswordsForOffline(passphrase).then(() => setOfflineEnabled(true));
+      }
+      void drainPasswordPending().then(() => refreshPending());
+    }
+  }, [loadEntries, loadEntriesFromSession, refreshPending]);
+
+  const toggleOffline = async () => {
+    setPinningOffline(true);
+    setError(null);
+    try {
+      if (offlineEnabled) {
+        await disablePasswordOffline();
+        clearStoredPassphrase();
+        setOfflineEnabled(false);
+      } else {
+        const pp = lastPassphraseRef.current;
+        if (!pp) throw new Error("Unlock again to enable offline passwords");
+        const result = await downloadPasswordsForOffline(pp);
+        if (!result.ok) throw new Error(result.error || "Failed to cache passwords");
+        setOfflineEnabled(true);
+      }
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setPinningOffline(false);
+    }
+  };
 
   const openEntry = async (id: string) => {
     setSelectedId(id);
     setFullEntry(null);
     setEditing(false);
     setShowPassword(false);
-    const r = await fetch(`/api/passwords/${id}`);
-    if (r.status === 423) { setSessionExpired(true); return; }
-    if (r.ok) setFullEntry((await r.json()).entry);
+    if (offlineMode || !navigator.onLine) {
+      const entry = await getOfflineEntry(id);
+      if (entry) setFullEntry(entry);
+      else setError("Entry not in offline vault");
+      return;
+    }
+    try {
+      const r = await fetch(`/api/passwords/${id}`);
+      if (r.status === 423) { setSessionExpired(true); return; }
+      if (r.ok) {
+        const entry = (await r.json()).entry as EntryFull;
+        setFullEntry(entry);
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+    const entry = await getOfflineEntry(id);
+    if (entry) {
+      setOfflineMode(true);
+      setFullEntry(entry);
+    }
   };
 
   const saveEntry = async () => {
@@ -306,43 +474,88 @@ export function PasswordManager() {
         shared_with: form.shared_with,
       };
 
+      const useOffline = offlineMode || !navigator.onLine;
+
       if (creating) {
-        const r = await fetch("/api/passwords", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (r.status === 423) { setSessionExpired(true); return; }
-        if (!r.ok) {
-          const text = await r.text();
-          let msg = `HTTP ${r.status}`;
-          try { msg = JSON.parse(text).error || msg; } catch { msg = text || msg; }
-          throw new Error(msg);
+        if (useOffline) {
+          if (!isPasswordSessionUnlocked()) throw new Error("Unlock offline vault first");
+          const now = new Date().toISOString();
+          const entry: OfflinePasswordEntry = {
+            id: newOfflinePasswordId(),
+            ...payload,
+            shared_with: payload.shared_with ?? [],
+            created_at: now,
+            updated_at: now,
+          };
+          await saveEntryOffline(entry, "create");
+          await refreshPending();
+          loadEntriesFromSession();
+          setCreating(false);
+          setSelectedId(entry.id);
+          setFullEntry(entry);
+          setOfflineMode(true);
+        } else {
+          const r = await fetch("/api/passwords", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (r.status === 423) { setSessionExpired(true); return; }
+          if (!r.ok) {
+            const text = await r.text();
+            let msg = `HTTP ${r.status}`;
+            try { msg = JSON.parse(text).error || msg; } catch { msg = text || msg; }
+            throw new Error(msg);
+          }
+          const newEntry = (await r.json()).entry;
+          if (offlineEnabled && lastPassphraseRef.current) {
+            void downloadPasswordsForOffline(lastPassphraseRef.current);
+          }
+          await loadEntries();
+          setCreating(false);
+          setSelectedId(newEntry.id);
+          void openEntry(newEntry.id);
         }
-        const newEntry = (await r.json()).entry;
-        await loadEntries();
-        setCreating(false);
-        setSelectedId(newEntry.id);
-        void openEntry(newEntry.id);
       } else if (selectedId) {
-        const r = await fetch(`/api/passwords/${selectedId}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (r.status === 423) { setSessionExpired(true); return; }
-        if (!r.ok) {
-          const text = await r.text();
-          let msg = `HTTP ${r.status}`;
-          try { msg = JSON.parse(text).error || msg; } catch { msg = text || msg; }
-          throw new Error(msg);
+        if (useOffline) {
+          const prev = (await getOfflineEntry(selectedId)) ?? fullEntry;
+          if (!prev) throw new Error("Entry not found offline");
+          const entry: OfflinePasswordEntry = {
+            ...prev,
+            ...payload,
+            id: selectedId,
+            shared_with: payload.shared_with ?? [],
+            updated_at: new Date().toISOString(),
+          };
+          await saveEntryOffline(entry, "update");
+          await refreshPending();
+          loadEntriesFromSession();
+          setEditing(false);
+          setFullEntry(entry);
+          setOfflineMode(true);
+        } else {
+          const r = await fetch(`/api/passwords/${selectedId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (r.status === 423) { setSessionExpired(true); return; }
+          if (!r.ok) {
+            const text = await r.text();
+            let msg = `HTTP ${r.status}`;
+            try { msg = JSON.parse(text).error || msg; } catch { msg = text || msg; }
+            throw new Error(msg);
+          }
+          if (offlineEnabled && lastPassphraseRef.current) {
+            void downloadPasswordsForOffline(lastPassphraseRef.current);
+          }
+          await loadEntries();
+          setEditing(false);
+          void openEntry(selectedId);
         }
-        await loadEntries();
-        setEditing(false);
-        void openEntry(selectedId);
       }
     } catch (e) {
-      setError(String(e));
+      setError(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setBusy(false);
     }
@@ -350,8 +563,18 @@ export function PasswordManager() {
 
   const deleteEntry = async (id: string) => {
     if (!confirm("Delete this entry? This cannot be undone.")) return;
+    if (offlineMode || !navigator.onLine) {
+      await deleteEntryOffline(id);
+      await refreshPending();
+      loadEntriesFromSession();
+      if (selectedId === id) { setSelectedId(null); setFullEntry(null); }
+      return;
+    }
     const r = await fetch(`/api/passwords/${id}`, { method: "DELETE" });
     if (r.status === 423) { setSessionExpired(true); return; }
+    if (offlineEnabled && lastPassphraseRef.current) {
+      void downloadPasswordsForOffline(lastPassphraseRef.current);
+    }
     setEntries((prev) => prev.filter((e) => e.id !== id));
     if (selectedId === id) { setSelectedId(null); setFullEntry(null); }
   };
@@ -399,6 +622,43 @@ export function PasswordManager() {
             placeholder="Search passwords…"
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-[var(--muted)]"
           />
+          {(offlineMode || offlineEnabled || pendingPwd > 0) && (
+            <span
+              title={
+                offlineMode
+                  ? pendingPwd > 0
+                    ? `Offline — ${pendingPwd} change(s) queued`
+                    : "Working offline"
+                  : pendingPwd > 0
+                    ? `${pendingPwd} password change(s) waiting to sync`
+                    : "Passwords available offline"
+              }
+              className="flex items-center gap-0.5 text-sky-600 dark:text-sky-400"
+            >
+              <CloudOff className="h-3.5 w-3.5" />
+              {pendingPwd > 0 && <span className="text-[10px] tabular-nums">{pendingPwd}</span>}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => void toggleOffline()}
+            disabled={pinningOffline || offlineMode}
+            title={
+              offlineEnabled
+                ? "Remove offline password vault"
+                : "Make passwords available offline"
+            }
+            className={cn(
+              "flex items-center justify-center rounded-lg p-1.5 hover:bg-[var(--border)] disabled:opacity-40",
+              offlineEnabled ? "text-sky-600 dark:text-sky-400" : "text-[var(--muted)] hover:text-[var(--foreground)]",
+            )}
+          >
+            {pinningOffline ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <CloudDownload className="h-4 w-4" />
+            )}
+          </button>
           <button type="button" onClick={startCreate} title="New password"
             className="flex items-center justify-center rounded-lg p-1.5 text-[var(--muted)] hover:bg-[var(--border)] hover:text-[var(--foreground)]">
             <Plus className="h-4 w-4" />

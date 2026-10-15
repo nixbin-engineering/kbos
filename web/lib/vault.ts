@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import yaml from "yaml";
@@ -8,6 +9,22 @@ import { mergeTags } from "./tags";
 import { isEncryptedNotePath } from "./utils";
 
 const VAULT_PATH = process.env.VAULT_PATH || "/vault";
+
+/** Serialize concurrent writes to the same absolute path within this process. */
+const writeChains = new Map<string, Promise<unknown>>();
+
+function enqueueWrite<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeChains.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  writeChains.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
 
 // Falls back to "Vault" (not the internal "docs" folder name) whenever
 // config/kb.yaml is missing/unreadable or has no vault.name set.
@@ -138,6 +155,13 @@ export async function readDoc(rel: string, passphrase?: string | null): Promise<
     raw = await fs.readFile(safeDocPath(plainRel), "utf8");
   }
 
+  let mtimeMs: number | undefined;
+  try {
+    mtimeMs = (await fs.stat(safeDocPath(storedPath))).mtimeMs;
+  } catch {
+    /* ignore */
+  }
+
   const { data, content } = matter(raw);
   const meta = data as DocMeta;
   let title = meta.title;
@@ -151,10 +175,27 @@ export async function readDoc(rel: string, passphrase?: string | null): Promise<
     body: content,
     raw,
     encrypted: hasEnc,
+    mtimeMs,
   };
 }
 
-export async function writeDoc(rel: string, raw: string): Promise<void> {
+/** mtime of the on-disk note file (plain .md, or .md.enc if that is what exists). */
+export async function docMtimeMs(rel: string): Promise<number | null> {
+  const plainRel = plainNotePath(rel).replace(/\\/g, "/");
+  const encRel = encryptedNotePath(plainRel);
+  try {
+    return (await fs.stat(safeDocPath(encRel))).mtimeMs;
+  } catch {
+    /* no enc */
+  }
+  try {
+    return (await fs.stat(safeDocPath(plainRel))).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeDoc(rel: string, raw: string): Promise<{ mtimeMs: number }> {
   if (isEncryptedNotePath(rel)) {
     throw new Error("cannot edit encrypted note — decrypt first");
   }
@@ -166,8 +207,33 @@ export async function writeDoc(rel: string, raw: string): Promise<void> {
     if (e instanceof Error && e.message.includes("decrypt first")) throw e;
   }
   const full = safeDocPath(rel);
-  await fs.mkdir(path.dirname(full), { recursive: true });
-  await fs.writeFile(full, raw, "utf8");
+  return enqueueWrite(full, async () => {
+    const dir = path.dirname(full);
+    await fs.mkdir(dir, { recursive: true });
+    const tmp = path.join(
+      dir,
+      `.${path.basename(full)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`,
+    );
+    try {
+      await fs.writeFile(tmp, raw, "utf8");
+      try {
+        const fh = await fs.open(tmp, "r+");
+        try {
+          await fh.sync();
+        } finally {
+          await fh.close();
+        }
+      } catch {
+        /* fsync best-effort */
+      }
+      await fs.rename(tmp, full);
+    } catch (e) {
+      await fs.unlink(tmp).catch(() => undefined);
+      throw e;
+    }
+    const st = await fs.stat(full);
+    return { mtimeMs: st.mtimeMs };
+  });
 }
 
 function todayISO(): string {

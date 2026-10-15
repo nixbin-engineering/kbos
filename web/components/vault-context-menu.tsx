@@ -1,6 +1,6 @@
 "use client";
 
-import { Columns2, Lock, Pencil, SquarePlus, Trash2, Unlock } from "lucide-react";
+import { CloudOff, CloudDownload, Columns2, Lock, Pencil, SquarePlus, Trash2, Unlock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -18,10 +18,18 @@ type Props = {
   onClose: () => void;
   onTreeRefresh: () => void;
   onDeleted: (path: string) => void;
+  onMoved?: (oldPath: string, newPath: string) => void;
+  onBeforeMove?: (movingPath: string) => Promise<void>;
   onOpenDoc?: (path: string) => void;
   onOpenDocNewTab?: (path: string) => void;
   onOpenDocInSplit?: (path: string) => void;
   isAdmin?: boolean;
+  /** Explicit offline pin for this target (file or folder). */
+  isOfflinePinned?: boolean;
+  onOfflinePin?: (path: string, type: "file" | "dir") => Promise<void>;
+  onOfflineUnpin?: (path: string) => Promise<void>;
+  /** When true, structural mutations should be blocked. */
+  networkOffline?: boolean;
 };
 
 export function VaultContextMenu({
@@ -30,10 +38,16 @@ export function VaultContextMenu({
   onClose,
   onTreeRefresh,
   onDeleted,
+  onMoved,
+  onBeforeMove,
   onOpenDoc,
   onOpenDocNewTab,
   onOpenDocInSplit,
   isAdmin = false,
+  isOfflinePinned = false,
+  onOfflinePin,
+  onOfflineUnpin,
+  networkOffline = false,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [dialog, setDialog] = useState<"encrypt" | "decrypt" | "delete" | "rename" | "rename-vault" | null>(null);
@@ -202,6 +216,7 @@ export function VaultContextMenu({
     setBusy(true);
     setError(null);
     try {
+      await onBeforeMove?.(target.itemPath);
       const isFile = target.itemType === "file";
       const url = isFile
         ? `/api/docs/${target.itemPath.split("/").map(encodeURIComponent).join("/")}`
@@ -210,18 +225,20 @@ export function VaultContextMenu({
       const parent = target.itemPath.includes("/")
         ? target.itemPath.slice(0, target.itemPath.lastIndexOf("/"))
         : "";
-      const newName = renameTo.trim().replace(/\.md$/, "");
+      const newName = renameTo.trim().replace(/\.md\.enc$/, "").replace(/\.md$/, "");
       const newPath = parent ? `${parent}/${newName}` : newName;
       const r = await fetch(url, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ newPath: isFile ? newPath : newPath }),
+        body: JSON.stringify({ newPath }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.statusText);
-      onDeleted(target.itemPath);
+      const resolved = (data.newPath as string) ?? (isFile ? `${newPath}.md` : newPath);
+      if (onMoved) onMoved(target.itemPath, resolved);
+      else onDeleted(target.itemPath);
       onTreeRefresh();
-      if (isFile) onOpenDoc?.(`${newPath}.md`);
+      if (isFile) onOpenDoc?.(resolved);
       setDialog(null);
       onClose();
     } catch (e) {
@@ -294,13 +311,60 @@ export function VaultContextMenu({
             />
           </>
         )}
+        {(target.itemType === "file" || target.itemType === "dir") && (onOfflinePin || onOfflineUnpin) && (
+          <>
+            <div className="my-1 border-t border-[var(--border)]" />
+            {isOfflinePinned ? (
+              <MenuBtn
+                icon={CloudOff}
+                label="Remove offline copy"
+                onClick={() => {
+                  void (async () => {
+                    setBusy(true);
+                    setError(null);
+                    try {
+                      await onOfflineUnpin?.(target.itemPath);
+                      onClose();
+                    } catch (e) {
+                      setError(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  })();
+                }}
+              />
+            ) : (
+              <MenuBtn
+                icon={CloudDownload}
+                label={target.itemType === "dir" ? "Make folder available offline" : "Make available offline"}
+                disabled={networkOffline || busy}
+                onClick={() => {
+                  void (async () => {
+                    setBusy(true);
+                    setError(null);
+                    try {
+                      await onOfflinePin?.(target.itemPath, target.itemType === "dir" ? "dir" : "file");
+                      onClose();
+                    } catch (e) {
+                      setError(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  })();
+                }}
+              />
+            )}
+          </>
+        )}
         {target.itemType !== "root" && (
           <>
             <div className="my-1 border-t border-[var(--border)]" />
             <MenuBtn
               icon={Pencil}
               label="Rename…"
+              disabled={networkOffline}
               onClick={() => {
+                if (networkOffline) return;
                 const name = target.itemName.replace(/\.md(\.enc)?$/, "");
                 setRenameTo(name);
                 setDialog("rename");
@@ -311,7 +375,9 @@ export function VaultContextMenu({
               icon={Trash2}
               label="Delete…"
               danger
+              disabled={networkOffline}
               onClick={() => {
+                if (networkOffline) return;
                 setDialog("delete");
                 setError(null);
               }}
@@ -439,18 +505,21 @@ function MenuBtn({
   label,
   onClick,
   danger,
+  disabled,
 }: {
   icon: typeof Lock;
   label: string;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={cn(
-        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--border)]",
+        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[var(--border)] disabled:opacity-40",
         danger && "text-red-600 dark:text-red-400",
       )}
     >
