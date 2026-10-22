@@ -49,10 +49,21 @@ async function ensureDir(): Promise<void> {
   await fs.chmod(passwordsDir(), 0o700).catch(() => {});
 }
 
+// Interactive scrypt cost. OpenSSL's allocator needs 128*r*(N+2+p) bytes,
+// which is ~32.01 MiB here — just over Node's 32 MiB default maxmem, so the
+// default call throws "memory limit exceeded". 64 MiB covers that overhead.
+const SCRYPT = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
+
+type ScryptParams = { N: number; r: number; p: number };
+
+function scryptOptions(params: ScryptParams) {
+  return { N: params.N, r: params.r, p: params.p, maxmem: SCRYPT.maxmem };
+}
+
 // Derive a 32-byte key from passphrase + salt using scrypt.
-async function deriveKey(passphrase: string, salt: Buffer): Promise<Buffer> {
+async function deriveKey(passphrase: string, salt: Buffer, params: ScryptParams = SCRYPT): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    crypto.scrypt(passphrase, salt, 32, { N: 32768, r: 8, p: 1 }, (err, key) => {
+    crypto.scrypt(passphrase, salt, 32, scryptOptions(params), (err, key) => {
       if (err) reject(err); else resolve(key);
     });
   });
@@ -69,18 +80,18 @@ function encryptSecrets(secrets: { password: string; totp_secret?: string }, pas
       const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
       const tag = cipher.getAuthTag();
       const combined = Buffer.concat([salt, iv, tag, encrypted]);
-      resolve({ payload: combined.toString("base64"), N: 32768, r: 8, p: 1 });
+      resolve({ payload: combined.toString("base64"), N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p });
     } catch (e) { reject(e); }
   });
 }
 
-async function decryptSecrets(payload: string, passphrase: string): Promise<{ password: string; totp_secret?: string }> {
+async function decryptSecrets(payload: string, passphrase: string, params: ScryptParams = SCRYPT): Promise<{ password: string; totp_secret?: string }> {
   const combined = Buffer.from(payload, "base64");
   const salt = combined.subarray(0, 32);
   const iv = combined.subarray(32, 44);
   const tag = combined.subarray(44, 60);
   const ciphertext = combined.subarray(60);
-  const key = await deriveKey(passphrase, salt);
+  const key = await deriveKey(passphrase, salt, params);
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
@@ -115,7 +126,11 @@ export async function listEntries(user: string): Promise<Omit<PasswordEntry, "pa
 export async function getEntry(id: string, passphrase: string): Promise<PasswordEntry> {
   const raw = await fs.readFile(entryPath(id), "utf8");
   const file = JSON.parse(raw) as EntryFile;
-  const secrets = await decryptSecrets(file.encrypted_payload, passphrase);
+  const secrets = await decryptSecrets(file.encrypted_payload, passphrase, {
+    N: file.N || SCRYPT.N,
+    r: file.r || SCRYPT.r,
+    p: file.p || SCRYPT.p,
+  });
   return { ...file.meta, ...secrets };
 }
 

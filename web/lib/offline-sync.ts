@@ -8,6 +8,7 @@ import {
   type OfflinePin,
   type PendingSave,
   cachedDocToResponse,
+  clearDraft,
   clearPendingForPath,
   deleteCachedDoc,
   deleteCachedDocsUnder,
@@ -15,7 +16,9 @@ import {
   enqueueSave,
   expandPinToFilePaths,
   getCachedDoc,
+  getDraft,
   getPin,
+  listDrafts,
   listPending,
   listPins,
   pathCoveredByPins,
@@ -320,6 +323,8 @@ async function putOne(item: PendingSave): Promise<"ok" | "conflict" | "auth" | "
 
     const doc = (await r.json()) as DocResponse;
     await putCachedDoc(docResponseToCached({ ...doc, path: item.path }));
+    const draft = await getDraft(item.path);
+    if (!draft || draft.raw === item.raw) await clearDraft(item.path);
     await removePending(item.id);
     await refreshPendingCount();
     return "ok";
@@ -357,6 +362,8 @@ export async function resolveConflictKeepLocal(path: string, rawOverride?: strin
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
       const doc = (await r.json()) as DocResponse;
       await putCachedDoc(docResponseToCached(doc, path));
+      const draft = await getDraft(path);
+      if (!draft || draft.raw === raw) await clearDraft(path);
       await refreshPendingCount();
       return true;
     } catch {
@@ -372,6 +379,7 @@ export async function resolveConflictKeepLocal(path: string, rawOverride?: strin
 
 export async function resolveConflictTakeServer(path: string): Promise<DocResponse | null> {
   await clearPendingForPath(path);
+  await clearDraft(path);
   setState({ conflict: null });
   await refreshPendingCount();
   try {
@@ -383,13 +391,52 @@ export async function resolveConflictTakeServer(path: string): Promise<DocRespon
   }
 }
 
+/** Push unconfirmed local drafts. Never force-overwrites the server. */
+export async function drainLocalDrafts(): Promise<void> {
+  if (typeof navigator !== "undefined" && !navigator.onLine) return;
+  const drafts = await listDrafts();
+  for (const draft of drafts) {
+    try {
+      const body: { raw: string; expectedMtime?: number; baseRaw?: string } = { raw: draft.raw };
+      if (draft.expectedMtime != null) body.expectedMtime = draft.expectedMtime;
+      if (draft.baseRaw != null) body.baseRaw = draft.baseRaw;
+      const r = await fetch(`/api/docs/${encodePath(draft.path)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        const current = await getDraft(draft.path);
+        if (!current || current.updatedAt <= draft.updatedAt) await clearDraft(draft.path);
+        continue;
+      }
+      if (r.status === 409) {
+        const data = await r.json().catch(() => ({}));
+        if (typeof data.raw === "string" && data.raw === draft.raw) {
+          await clearDraft(draft.path);
+          continue;
+        }
+        setState({
+          conflict: {
+            path: draft.path,
+            raw: typeof data.raw === "string" ? data.raw : undefined,
+            mtimeMs: typeof data.mtimeMs === "number" ? data.mtimeMs : undefined,
+          },
+        });
+      }
+    } catch {
+      return;
+    }
+  }
+}
+
 export function startOfflineSync(): () => void {
   if (started || typeof window === "undefined") return () => undefined;
   started = true;
 
   const onOnline = () => {
     setState({ status: "online" });
-    void refreshPendingCount().then(() => drainPendingQueue());
+    void refreshPendingCount().then(() => drainPendingQueue()).then(() => drainLocalDrafts());
   };
   const onOffline = () => setState({ status: "offline" });
 

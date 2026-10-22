@@ -1,18 +1,13 @@
-import { readFile, rename, stat } from "fs/promises";
+import { rename } from "fs/promises";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { sessionCookieName } from "@/lib/auth";
 import { getUnlockSession, unlockSessionKey } from "@/lib/crypto-session";
 import { isAuthError, requireAuth } from "@/lib/require-auth";
 import { invalidateLinkIndex } from "@/lib/links";
-import { EncryptedDocError, readDoc, safeDocPath, vaultReady, writeDoc, deleteDoc } from "@/lib/vault";
+import { EncryptedDocError, readDoc, safeDocPath, vaultReady, commitDoc, deleteDoc } from "@/lib/vault";
 import { isEncryptedNotePath } from "@/lib/utils";
 import { removeDocVectors } from "@/lib/ai/vector-store";
-
-/** mtimeMs floats can differ slightly across round-trips; treat within 1ms as equal. */
-function mtimeMatches(disk: number, expected: number): boolean {
-  return Math.abs(disk - expected) < 1;
-}
 
 /** Normalize a rename/move destination, preserving .md.enc when the source (or target) is encrypted. */
 function normalizeDocNewPath(rawNew: string, srcRel: string): string {
@@ -71,41 +66,37 @@ export async function PUT(req: NextRequest, { params }: Params) {
     typeof body.expectedMtime === "number" && Number.isFinite(body.expectedMtime)
       ? (body.expectedMtime as number)
       : undefined;
+  const baseRaw = typeof body.baseRaw === "string" ? (body.baseRaw as string) : undefined;
   const force = body.force === true;
 
   try {
-    const abs = safeDocPath(rel);
-
-    if (expectedMtime != null && !force) {
-      try {
-        const st = await stat(abs);
-        if (!mtimeMatches(st.mtimeMs, expectedMtime)) {
-          let diskRaw: string | undefined;
-          try {
-            diskRaw = await readFile(abs, "utf8");
-          } catch {
-            /* ignore */
-          }
-          return NextResponse.json(
-            { error: "conflict", mtimeMs: st.mtimeMs, raw: diskRaw },
-            { status: 409 },
-          );
-        }
-      } catch {
-        // File does not exist yet — first write is allowed
-      }
+    safeDocPath(rel);
+    const committed = await commitDoc(rel, {
+      raw: body.raw,
+      expectedMtime,
+      baseRaw,
+      force,
+    });
+    if (!committed.ok) {
+      return NextResponse.json(
+        { error: "conflict", mtimeMs: committed.mtimeMs, raw: committed.raw },
+        { status: 409 },
+      );
     }
-
-    const { mtimeMs } = await writeDoc(rel, body.raw);
     invalidateLinkIndex();
     const doc = await readDoc(rel);
-    // Fire-and-forget incremental vector index update (no embed model = no-op inside)
     void fetch(new URL("/api/ai/index", req.url).toString(), {
       method: "PUT",
       headers: { "Content-Type": "application/json", cookie: req.headers.get("cookie") || "" },
       body: JSON.stringify({ path: rel }),
     }).catch(() => undefined);
-    return NextResponse.json({ ...doc, mtimeMs: doc.mtimeMs ?? mtimeMs });
+    return NextResponse.json({
+      ...doc,
+      raw: committed.raw,
+      mtimeMs: committed.mtimeMs,
+      merged: committed.merged,
+      conflicts: committed.conflicts,
+    });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
   }

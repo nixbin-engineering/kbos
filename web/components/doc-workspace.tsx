@@ -8,6 +8,8 @@ import { mergeLiveFolderIndex } from "@/lib/folder-index-live";
 import { mergeTags } from "@/lib/tags";
 import { extractToc, findHeadingLine } from "@/lib/toc";
 import { cn } from "@/lib/utils";
+import { merge3 } from "@/lib/merge3";
+import { clearDraft, getDraft, putDraft } from "@/lib/offline-store";
 import {
   isPathOfflineAvailable,
   loadDocOffline,
@@ -43,8 +45,8 @@ type Props = {
   scrollRef?: React.RefObject<HTMLDivElement | null>;
 };
 
-/** Typing debounce cap so edits feel instantly persisted. */
-const SAVE_DEBOUNCE_MAX_MS = 500;
+/** Typing debounce cap so other open copies see edits quickly. */
+const SAVE_DEBOUNCE_MAX_MS = 300;
 
 function wordCount(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
@@ -209,6 +211,7 @@ export function DocWorkspace({
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [diskChanged, setDiskChanged] = useState(false);
+  const [overlap, setOverlap] = useState(false);
   const [diskContent, setDiskContent] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "pending" | "saved" | "offline">("idle");
@@ -237,6 +240,7 @@ export function DocWorkspace({
   const onSavedRef = useRef(onSaved);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const baseMtimeRef = useRef<number | null>(null);
+  const baseRawRef = useRef<string>("");
   const suppressLeaveFlushRef = useRef(false);
   const ignoreRemoteUntilRef = useRef(0);
   const saveInflightRef = useRef<Promise<boolean> | null>(null);
@@ -277,12 +281,15 @@ export function DocWorkspace({
   const applyLoadedDoc = useCallback((d: DocResponse) => {
     setDoc(d);
     setRaw(d.raw);
+    rawRef.current = d.raw;
+    baseRawRef.current = d.raw;
     baseMtimeRef.current = typeof d.mtimeMs === "number" ? d.mtimeMs : null;
     setDirty(false);
     dirtyRef.current = false;
     setDiskChanged(false);
     setDiskContent(null);
     setShowDiff(false);
+    setOverlap(!!d.conflicts);
     setSaveState("idle");
     if (d.encrypted) setNeedsUnlock(true);
     else setNeedsUnlock(false);
@@ -306,6 +313,29 @@ export function DocWorkspace({
           }
           if (!r.ok) throw new Error((await r.json()).error || r.statusText);
           const d = (await r.json()) as DocResponse;
+          const draft = await getDraft(docPath).catch(() => null);
+          if (draft && draft.raw !== d.raw) {
+            const merged = merge3(draft.baseRaw ?? d.raw, draft.raw, d.raw);
+            setDoc(d);
+            setRaw(merged.text);
+            rawRef.current = merged.text;
+            baseRawRef.current = d.raw;
+            baseMtimeRef.current = typeof d.mtimeMs === "number" ? d.mtimeMs : null;
+            setNeedsUnlock(false);
+            setOverlap(merged.conflicts);
+            if (merged.text !== d.raw) {
+              setDirty(true);
+              dirtyRef.current = true;
+              setSaveState("pending");
+            } else {
+              setDirty(false);
+              dirtyRef.current = false;
+              await clearDraft(docPath).catch(() => undefined);
+            }
+            void maybeCacheOnlineDoc(d);
+            return;
+          }
+          if (draft) await clearDraft(docPath).catch(() => undefined);
           applyLoadedDoc(d);
           void maybeCacheOnlineDoc(d);
           return;
@@ -422,42 +452,76 @@ export function DocWorkspace({
       // Flush pending edits for this path before leaving (navigate / unmount).
       if (!dirtyRef.current || encryptedRef.current) return;
       const content = rawRef.current;
+      const expectedMtime = baseMtimeRef.current;
+      const baseRaw = baseRawRef.current;
       dirtyRef.current = false;
       if (autosaveTimerRef.current) {
         clearTimeout(autosaveTimerRef.current);
         autosaveTimerRef.current = null;
       }
-      // Backup flush: force so a soft conflict cannot drop navigation edits.
+      void putDraft({
+        path: trackedPath,
+        raw: content,
+        expectedMtime,
+        baseRaw,
+        updatedAt: Date.now(),
+      }).catch(() => undefined);
       void fetch(`/api/docs/${trackedPath.split("/").map(encodeURIComponent).join("/")}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw: content, force: true }),
+        body: JSON.stringify({
+          raw: content,
+          ...(expectedMtime != null ? { expectedMtime } : {}),
+          baseRaw,
+        }),
         keepalive: true,
-      }).then((r) => {
-        if (r.ok) onSavedRef.current?.();
+      }).then(async (r) => {
+        if (r.ok) {
+          await clearDraft(trackedPath).catch(() => undefined);
+          onSavedRef.current?.();
+        }
       }).catch(() => undefined);
     };
   }, [path, loadDoc]);
 
   useEffect(() => {
     if (!path || !docRemoteRev || docRemoteRev.path !== path) return;
-    // Ignore self-notify from our own recent save
     if (Date.now() < ignoreRemoteUntilRef.current) return;
-    if (dirty) {
-      setDiskChanged(true);
-      fetch(`/api/docs/${path.split("/").map(encodeURIComponent).join("/")}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          if (d?.raw != null) setDiskContent(d.raw);
-          if (typeof d?.mtimeMs === "number") {
-            /* keep baseMtime as our last known; disk is ahead */
-          }
-        })
-        .catch(() => undefined);
-      return;
-    }
-    void loadDoc(path, { silent: true });
-  }, [docRemoteRev, path, dirty, loadDoc]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/docs/${path.split("/").map(encodeURIComponent).join("/")}`);
+        if (!r.ok || cancelled) return;
+        const d = (await r.json()) as DocResponse;
+        if (cancelled) return;
+        if (d.raw === rawRef.current) {
+          baseRawRef.current = d.raw;
+          if (typeof d.mtimeMs === "number") baseMtimeRef.current = d.mtimeMs;
+          return;
+        }
+        if (!dirtyRef.current) {
+          applyLoadedDoc(d);
+          void maybeCacheOnlineDoc(d);
+          return;
+        }
+        const merged = merge3(baseRawRef.current || d.raw, rawRef.current, d.raw);
+        baseRawRef.current = d.raw;
+        if (typeof d.mtimeMs === "number") baseMtimeRef.current = d.mtimeMs;
+        setRaw(merged.text);
+        rawRef.current = merged.text;
+        setDirty(true);
+        dirtyRef.current = true;
+        setSaveState("pending");
+        if (merged.conflicts) setOverlap(true);
+        void saveRef.current?.();
+      } catch {
+        /* stay on the local buffer */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [docRemoteRev, path, applyLoadedDoc]);
 
   // Surface sync-queue conflicts for the open note
   useEffect(() => {
@@ -478,18 +542,28 @@ export function DocWorkspace({
       content: string,
       opts?: { keepalive?: boolean; force?: boolean; expectedMtime?: number | null },
     ): Promise<DocResponse | null | "conflict" | "offline"> => {
-      const body: { raw: string; expectedMtime?: number; force?: boolean } = { raw: content };
-      if (opts?.force) body.force = true;
-      else if (opts?.expectedMtime != null) body.expectedMtime = opts.expectedMtime;
-      else if (baseMtimeRef.current != null) body.expectedMtime = baseMtimeRef.current;
-
+      const body: { raw: string; expectedMtime?: number; baseRaw?: string; force?: boolean } = {
+        raw: content,
+      };
       const expected =
         opts?.expectedMtime != null ? opts.expectedMtime : baseMtimeRef.current;
+      const baseRaw = baseRawRef.current;
+      if (opts?.force) body.force = true;
+      else if (expected != null) body.expectedMtime = expected;
+      if (baseRaw) body.baseRaw = baseRaw;
+
+      await putDraft({
+        path: docPath,
+        raw: content,
+        expectedMtime: expected ?? null,
+        baseRaw,
+        updatedAt: Date.now(),
+      }).catch(() => undefined);
 
       const tryOffline = async (): Promise<"offline"> => {
-        const available = await isPathOfflineAvailable(docPath);
-        if (!available) throw new Error("Not available offline — pin this note while online");
-        await saveDocOffline(docPath, content, expected, opts?.force);
+        if (await isPathOfflineAvailable(docPath)) {
+          await saveDocOffline(docPath, content, expected, opts?.force);
+        }
         return "offline";
       };
 
@@ -511,8 +585,15 @@ export function DocWorkspace({
           return "conflict";
         }
         if (!r.ok) throw new Error((await r.json()).error || r.statusText);
-        if (opts?.keepalive) return null;
+        if (opts?.keepalive) {
+          await clearDraft(docPath).catch(() => undefined);
+          return null;
+        }
         const doc = (await r.json()) as DocResponse;
+        const still = await getDraft(docPath).catch(() => null);
+        if (!still || still.raw === content || still.raw === doc.raw) {
+          await clearDraft(docPath).catch(() => undefined);
+        }
         void maybeCacheOnlineDoc(doc);
         return doc;
       } catch (e) {
@@ -552,19 +633,11 @@ export function DocWorkspace({
               break;
             }
             if (result === "offline") {
-              if (rawRef.current === req.content) {
-                setDirty(false);
-                dirtyRef.current = false;
-                setSaveState("offline");
-              } else {
-                setSaveState("pending");
-              }
-              onSavedRef.current?.();
-              next = saveQueuedRef.current;
-              if (!next && dirtyRef.current && rawRef.current !== req.content) {
-                next = { content: rawRef.current, force: req.force };
-              }
-              continue;
+              setSaveState("offline");
+              window.setTimeout(() => {
+                if (dirtyRef.current && pathRef.current === docPath) void saveRef.current?.();
+              }, 2500);
+              break;
             }
             if (!result) {
               ok = false;
@@ -572,9 +645,12 @@ export function DocWorkspace({
             }
             setDoc(result);
             if (typeof result.mtimeMs === "number") baseMtimeRef.current = result.mtimeMs;
-            ignoreRemoteUntilRef.current = Date.now() + 1500;
-            if (rawRef.current === req.content) {
+            baseRawRef.current = result.raw;
+            ignoreRemoteUntilRef.current = Date.now() + 800;
+            if (result.conflicts) setOverlap(true);
+            if (rawRef.current === req.content || rawRef.current === result.raw) {
               setRaw(result.raw);
+              rawRef.current = result.raw;
               setDirty(false);
               dirtyRef.current = false;
               setDiskChanged(false);
@@ -582,6 +658,12 @@ export function DocWorkspace({
               setShowDiff(false);
               setSaveState("saved");
             } else {
+              const merged = merge3(req.content, rawRef.current, result.raw);
+              setRaw(merged.text);
+              rawRef.current = merged.text;
+              setDirty(true);
+              dirtyRef.current = true;
+              if (merged.conflicts) setOverlap(true);
               setSaveState("pending");
             }
             onSavedRef.current?.();
@@ -643,10 +725,16 @@ export function DocWorkspace({
     const docPath = pathRef.current;
     if (!docPath || !dirtyRef.current || encryptedRef.current) return;
     const content = rawRef.current;
-    const body: { raw: string; expectedMtime?: number; force?: boolean } = { raw: content };
+    const body: { raw: string; expectedMtime?: number; baseRaw?: string } = { raw: content };
     if (baseMtimeRef.current != null) body.expectedMtime = baseMtimeRef.current;
-    // Unload must not lose edits to a soft conflict — force overwrite.
-    body.force = true;
+    if (baseRawRef.current) body.baseRaw = baseRawRef.current;
+    void putDraft({
+      path: docPath,
+      raw: content,
+      expectedMtime: baseMtimeRef.current,
+      baseRaw: baseRawRef.current,
+      updatedAt: Date.now(),
+    }).catch(() => undefined);
     void fetch(`/api/docs/${docPath.split("/").map(encodeURIComponent).join("/")}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -663,6 +751,13 @@ export function DocWorkspace({
     // Pause while a conflict banner is up so we don't 409-loop.
     if (!dirty || !path || !dirtyRef.current || diskChanged) return;
     setSaveState("pending");
+    void putDraft({
+      path,
+      raw: rawRef.current,
+      expectedMtime: baseMtimeRef.current,
+      baseRaw: baseRawRef.current,
+      updatedAt: Date.now(),
+    }).catch(() => undefined);
     const debounceMs = Math.min(Math.max(1, autosaveSeconds) * 1000, SAVE_DEBOUNCE_MAX_MS);
     autosaveTimerRef.current = setTimeout(() => {
       autosaveTimerRef.current = null;
@@ -1088,6 +1183,14 @@ export function DocWorkspace({
       {error && <p className="bg-red-500/10 px-4 py-2 text-sm text-red-600 dark:text-red-300">{error}</p>}
       {uploadError && (
         <p className="bg-red-500/10 px-4 py-2 text-sm text-red-600 dark:text-red-300">{uploadError}</p>
+      )}
+      {overlap && (
+        <div className="bg-amber-500/10 px-4 py-2 text-sm text-amber-900 dark:text-amber-100">
+          Edits from another session overlapped on the same lines. Both versions are in the note between conflict markers.
+          <button type="button" onClick={() => setOverlap(false)} className="ml-2 underline">
+            Dismiss
+          </button>
+        </div>
       )}
       {diskChanged && (
         <>

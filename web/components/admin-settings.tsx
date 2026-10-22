@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, BookOpen, Building2, ChevronDown, Database, Download, HardDrive, Loader2, Lock, Palette, RefreshCw, Settings, ShieldAlert, Sparkles, Trash2, UserPlus, Users, Users2, X } from "lucide-react";
+import { Bot, BookOpen, Building2, ChevronDown, Database, Download, HardDrive, Info, Loader2, Lock, Palette, RefreshCw, Settings, ShieldAlert, Sparkles, Trash2, UserPlus, Users, Users2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
@@ -136,6 +136,35 @@ function ModelPicker({
   );
 }
 
+type AboutInfo = {
+  name: string;
+  version: string;
+  commit: string | null;
+  built_at: string | null;
+  node: string;
+  platform: string;
+  arch: string;
+  env: string;
+  kb: string | null;
+  uptime_seconds: number;
+};
+
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
+}
+
+function formatBuilt(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString();
+}
+
 export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultRenamed, iconOnly }: Props) {
   const [open, setOpen] = useState(false);
   const [secs, setSecs] = useState(autosaveSeconds);
@@ -181,6 +210,8 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
   const [newRole, setNewRole] = useState<"editor" | "admin">("editor");
   const [userBusy, setUserBusy] = useState(false);
   const [userError, setUserError] = useState<string | null>(null);
+  const [about, setAbout] = useState<AboutInfo | null>(null);
+  const [aboutError, setAboutError] = useState<string | null>(null);
   const [editingPass, setEditingPass] = useState<string | null>(null);
   const [editPassValue, setEditPassValue] = useState("");
 
@@ -281,9 +312,21 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     if (usersResp.ok) setUsers((await usersResp.json()).users || []);
   }, []);
 
+  const loadAbout = useCallback(async () => {
+    setAboutError(null);
+    try {
+      const r = await fetch("/api/about");
+      if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+      setAbout((await r.json()) as AboutInfo);
+    } catch (e) {
+      setAbout(null);
+      setAboutError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
-    if (open) { loadSettings(); void loadVaults(); void loadGroups(); }
-  }, [open, loadSettings, loadVaults, loadGroups]);
+    if (open) { loadSettings(); void loadVaults(); void loadGroups(); void loadAbout(); }
+  }, [open, loadSettings, loadVaults, loadGroups, loadAbout]);
 
   const selectAiProfile = (id: string) => {
     const p = ai.profiles.find((x) => x.id === id);
@@ -528,7 +571,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     setIndexing(false);
   };
 
-  type SettingsTab = "general" | "appearance" | "ai" | "users" | "groups" | "vaults" | "security" | "system";
+  type SettingsTab = "general" | "appearance" | "ai" | "users" | "groups" | "vaults" | "security" | "system" | "about";
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
 
   const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
@@ -540,6 +583,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
     { id: "vaults", label: "Vaults", icon: BookOpen },
     { id: "security", label: "Security", icon: ShieldAlert },
     { id: "system", label: "System", icon: HardDrive },
+    { id: "about", label: "About", icon: Info },
   ];
 
   const { theme: currentTheme, setTheme } = useTheme();
@@ -596,7 +640,7 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
 
             <div className="flex min-h-0 flex-1">
               {/* Sidebar tabs */}
-              <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r border-[var(--border)] p-2">
+              <nav className="flex w-40 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--border)] p-2">
                 {TABS.map(({ id, label, icon: Icon }) => (
                   <button
                     key={id}
@@ -1364,6 +1408,37 @@ export function AdminSettingsButton({ role, autosaveSeconds, onUpdated, onVaultR
                       </button>
                     </div>
                     {error && <p className="text-sm text-red-600">{error}</p>}
+                  </div>
+                )}
+
+                {activeTab === "about" && (
+                  <div className="space-y-5">
+                    <div>
+                      <h3 className="text-sm font-medium uppercase tracking-wide text-[var(--muted)]">KBOS</h3>
+                      <p className="mt-1 text-2xl font-semibold">{about?.version ?? "…"}</p>
+                      <p className="mt-1 text-sm text-[var(--muted)]">Local-first knowledge base. Markdown on disk is the source of truth.</p>
+                    </div>
+                    {aboutError && <p className="text-sm text-red-600">{aboutError}</p>}
+                    {about && (
+                      <dl className="space-y-2 text-sm">
+                        {(
+                          [
+                            ["Commit", about.commit],
+                            ["Built", about.built_at ? formatBuilt(about.built_at) : null],
+                            ["Environment", about.env],
+                            ["Node.js", about.node],
+                            ["Platform", `${about.platform} / ${about.arch}`],
+                            ["kb CLI", about.kb],
+                            ["Uptime", formatUptime(about.uptime_seconds)],
+                          ] as [string, string | null][]
+                        ).map(([label, value]) => (
+                          <div key={label} className="flex items-baseline justify-between gap-4 border-b border-[var(--border)] py-2">
+                            <dt className="text-[var(--muted)]">{label}</dt>
+                            <dd className={cn("text-right", label === "Commit" && "font-mono text-xs")}>{value || "—"}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
                   </div>
                 )}
 

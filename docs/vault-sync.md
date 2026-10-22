@@ -70,7 +70,7 @@ See [`docker-compose.sync.yml`](../docker-compose.sync.yml) and [`.env.example`]
 
 ## Ops caveats
 
-- **Concurrent edits** on the same file = last-write-wins until a future conflict UI exists. Prefer editing on one machine at a time when possible.
+- **Concurrent edits** on the same file are merged when both saves go through KBOS (`merge3` in the app). Same-line edits are kept with conflict markers. Syncthing itself is still last-write-wins if two hosts write the file without going through that save. Live typing (cursors, keystrokes) is not implemented; see [live-session.md](live-session.md).
 - **UID/GID**: set `DOCKER_UID` / `DOCKER_GID` to the host user that owns the vault so both KBOS and Syncthing write compatible ownership.
 - **Multi-vault (`VAULTS_BASE`)**: this runbook targets the primary `VAULT_PATH`. Extra vaults under `./vaults` need their own Syncthing folders if you use them.
 - After bulk sync, if tags/search lag: `./manage.sh rebuild`.
@@ -78,5 +78,5 @@ See [`docker-compose.sync.yml`](../docker-compose.sync.yml) and [`.env.example`]
 ## Deferred (not planned until Syncthing proves insufficient)
 
 - In-app “Sync now” / push-pull between KBOS instances
-- Conflict resolution UI or CRDT merging
+- Live collaborator session (keystrokes and cursors) — see [live-session.md](live-session.md)
 - Syncing container images or `.kb` caches as source of truth

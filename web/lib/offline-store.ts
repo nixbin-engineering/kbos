@@ -7,7 +7,17 @@ import type { DocResponse, TreeNode } from "./types";
 import { isEncryptedNotePath } from "./utils";
 
 const DB_NAME = "kbos-offline";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+
+/** Unconfirmed editor content. Cleared only after the server accepts the write. */
+export type LocalDraft = {
+  path: string;
+  raw: string;
+  expectedMtime: number | null;
+  /** Content this draft was based on, so a later sync can merge instead of overwrite. */
+  baseRaw?: string | null;
+  updatedAt: number;
+};
 
 export type OfflinePin = {
   path: string;
@@ -39,14 +49,20 @@ export type OfflineMeta = {
   lastSyncAt: number | null;
 };
 
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
       reject(new Error("IndexedDB unavailable"));
       return;
     }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onerror = () => reject(req.error ?? new Error("idb open failed"));
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error ?? new Error("idb open failed"));
+    };
     req.onsuccess = () => resolve(req.result);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -64,8 +80,12 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "key" });
       }
+      if (!db.objectStoreNames.contains("drafts")) {
+        db.createObjectStore("drafts", { keyPath: "path" });
+      }
     };
   });
+  return dbPromise;
 }
 
 function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
@@ -84,20 +104,43 @@ function txDone(tx: IDBTransaction): Promise<void> {
 }
 
 async function withStore<T>(
-  store: "pins" | "docs" | "pending" | "meta",
+  store: "pins" | "docs" | "pending" | "meta" | "drafts",
   mode: IDBTransactionMode,
   fn: (s: IDBObjectStore, tx: IDBTransaction) => Promise<T> | T,
 ): Promise<T> {
   const db = await openDb();
-  try {
-    const tx = db.transaction(store, mode);
-    const s = tx.objectStore(store);
-    const result = await fn(s, tx);
-    await txDone(tx);
-    return result;
-  } finally {
-    db.close();
-  }
+  const tx = db.transaction(store, mode);
+  const s = tx.objectStore(store);
+  const result = await fn(s, tx);
+  await txDone(tx);
+  return result;
+}
+
+export async function putDraft(draft: LocalDraft): Promise<void> {
+  await withStore("drafts", "readwrite", (s) => {
+    s.put(draft);
+  });
+}
+
+export async function getDraft(path: string): Promise<LocalDraft | null> {
+  return withStore("drafts", "readonly", async (s) => {
+    const row = await reqToPromise(s.get(path));
+    return (row as LocalDraft) ?? null;
+  });
+}
+
+/** Drop a draft only after the server has accepted this exact content. */
+export async function clearDraft(path: string): Promise<void> {
+  await withStore("drafts", "readwrite", (s) => {
+    s.delete(path);
+  });
+}
+
+export async function listDrafts(): Promise<LocalDraft[]> {
+  return withStore("drafts", "readonly", async (s) => {
+    const all = (await reqToPromise(s.getAll())) as LocalDraft[];
+    return all.sort((a, b) => a.updatedAt - b.updatedAt);
+  });
 }
 
 export async function listPins(): Promise<OfflinePin[]> {

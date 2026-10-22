@@ -300,9 +300,25 @@ fix_perms() {
   fi
 }
 
+# Stamped into images as KBOS_VERSION / KBOS_COMMIT / KBOS_BUILT_AT (Settings → About).
+export_build_meta() {
+  local described commit
+  described="$(git describe --tags --always --dirty 2>/dev/null || true)"
+  KBOS_VERSION="${described:-dev}"
+  commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  if [[ -n "$commit" && -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    KBOS_COMMIT="${commit}-dirty"
+  else
+    KBOS_COMMIT="$commit"
+  fi
+  KBOS_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export KBOS_VERSION KBOS_COMMIT KBOS_BUILT_AT
+}
+
 dc() {
   load_env
   ensure_vault_dir
+  export_build_meta
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
@@ -475,8 +491,15 @@ cmd_docker_build() {
   local TAG_ARG BUMP_KIND DOCKER_PLATFORM
   resolve_release_tag "$@"
   resolve_build_platform "$@"
+  export_build_meta
+  # The tag being published is the version, even when HEAD is still on the previous tag.
+  KBOS_VERSION="$TAG_ARG"
+  export KBOS_VERSION
   bold "Building ${IMAGE_REPO}:${TAG_ARG} (+ :latest) for ${DOCKER_PLATFORM} from web/Dockerfile"
   docker build --platform "$DOCKER_PLATFORM" -f web/Dockerfile \
+    --build-arg "KBOS_VERSION=${KBOS_VERSION}" \
+    --build-arg "KBOS_COMMIT=${KBOS_COMMIT}" \
+    --build-arg "KBOS_BUILT_AT=${KBOS_BUILT_AT}" \
     -t "${IMAGE_REPO}:${TAG_ARG}" -t "${IMAGE_REPO}:latest" .
   green "Built ${IMAGE_REPO}:${TAG_ARG} and ${IMAGE_REPO}:latest (${DOCKER_PLATFORM})"
 }

@@ -26,6 +26,10 @@ export type DocResponse = {
   encrypted?: boolean;
   /** Filesystem mtime in ms; used for optimistic concurrency on save. */
   mtimeMs?: number;
+  /** True when this save was merged with edits from another client. */
+  merged?: boolean;
+  /** True when both sides edited the same lines; markers are in `raw`. */
+  conflicts?: boolean;
 };
 
 export type SearchHit = {

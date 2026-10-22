@@ -7,6 +7,7 @@ import type { DocMeta, DocResponse, FolderIndex, FolderIndexEntry, SearchHit, Te
 import { kbDecryptToMemory } from "./kb-runner";
 import { mergeTags } from "./tags";
 import { isEncryptedNotePath } from "./utils";
+import { merge3 } from "./merge3";
 
 const VAULT_PATH = process.env.VAULT_PATH || "/vault";
 
@@ -195,7 +196,59 @@ export async function docMtimeMs(rel: string): Promise<number | null> {
   }
 }
 
-export async function writeDoc(rel: string, raw: string): Promise<{ mtimeMs: number }> {
+async function atomicReplace(full: string, raw: string): Promise<number> {
+  const dir = path.dirname(full);
+  await fs.mkdir(dir, { recursive: true });
+  const tmp = path.join(
+    dir,
+    `.${path.basename(full)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`,
+  );
+  try {
+    await fs.writeFile(tmp, raw, "utf8");
+    try {
+      const fh = await fs.open(tmp, "r+");
+      try {
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      /* fsync best-effort */
+    }
+    await fs.rename(tmp, full);
+  } catch (e) {
+    await fs.unlink(tmp).catch(() => undefined);
+    throw e;
+  }
+  return (await fs.stat(full)).mtimeMs;
+}
+
+function mtimeClose(a: number, b: number): boolean {
+  return Math.abs(a - b) < 1;
+}
+
+export type CommitDocResult = {
+  ok: true;
+  mtimeMs: number;
+  raw: string;
+  merged: boolean;
+  conflicts: boolean;
+};
+
+export type CommitDocConflict = {
+  ok: false;
+  mtimeMs: number;
+  raw: string;
+};
+
+/**
+ * Write a note, merging with the current file when another client saved first.
+ * The read-merge-write runs under the per-path lock so n writers serialize.
+ */
+export async function commitDoc(
+  rel: string,
+  input: { raw: string; expectedMtime?: number | null; baseRaw?: string | null; force?: boolean },
+): Promise<CommitDocResult | CommitDocConflict> {
   if (isEncryptedNotePath(rel)) {
     throw new Error("cannot edit encrypted note — decrypt first");
   }
@@ -208,32 +261,61 @@ export async function writeDoc(rel: string, raw: string): Promise<{ mtimeMs: num
   }
   const full = safeDocPath(rel);
   return enqueueWrite(full, async () => {
-    const dir = path.dirname(full);
-    await fs.mkdir(dir, { recursive: true });
-    const tmp = path.join(
-      dir,
-      `.${path.basename(full)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`,
-    );
+    let disk: string | null = null;
+    let diskMtime = 0;
     try {
-      await fs.writeFile(tmp, raw, "utf8");
-      try {
-        const fh = await fs.open(tmp, "r+");
-        try {
-          await fh.sync();
-        } finally {
-          await fh.close();
-        }
-      } catch {
-        /* fsync best-effort */
-      }
-      await fs.rename(tmp, full);
-    } catch (e) {
-      await fs.unlink(tmp).catch(() => undefined);
-      throw e;
+      disk = await fs.readFile(full, "utf8");
+      diskMtime = (await fs.stat(full)).mtimeMs;
+    } catch {
+      disk = null;
     }
-    const st = await fs.stat(full);
-    return { mtimeMs: st.mtimeMs };
+
+    if (disk == null) {
+      const mtimeMs = await atomicReplace(full, input.raw);
+      return { ok: true as const, mtimeMs, raw: input.raw, merged: false, conflicts: false };
+    }
+
+    if (input.force) {
+      const mtimeMs = await atomicReplace(full, input.raw);
+      return { ok: true as const, mtimeMs, raw: input.raw, merged: false, conflicts: false };
+    }
+
+    const expectedOk =
+      input.expectedMtime != null && mtimeClose(diskMtime, input.expectedMtime);
+    if (expectedOk || input.raw === disk) {
+      if (input.raw === disk) {
+        return { ok: true as const, mtimeMs: diskMtime, raw: disk, merged: false, conflicts: false };
+      }
+      const mtimeMs = await atomicReplace(full, input.raw);
+      return { ok: true as const, mtimeMs, raw: input.raw, merged: false, conflicts: false };
+    }
+
+    if (input.baseRaw == null) {
+      return { ok: false as const, mtimeMs: diskMtime, raw: disk };
+    }
+
+    const merged = merge3(input.baseRaw, input.raw, disk);
+    if (merged.text === disk) {
+      return { ok: true as const, mtimeMs: diskMtime, raw: disk, merged: true, conflicts: merged.conflicts };
+    }
+    const mtimeMs = await atomicReplace(full, merged.text);
+    return { ok: true as const, mtimeMs, raw: merged.text, merged: true, conflicts: merged.conflicts };
   });
+}
+
+export async function writeDoc(rel: string, raw: string): Promise<{ mtimeMs: number }> {
+  if (isEncryptedNotePath(rel)) {
+    throw new Error("cannot edit encrypted note — decrypt first");
+  }
+  const enc = encryptedNotePath(rel);
+  try {
+    await fs.access(safeDocPath(enc));
+    throw new Error("cannot edit encrypted note — decrypt first");
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("decrypt first")) throw e;
+  }
+  const full = safeDocPath(rel);
+  return enqueueWrite(full, async () => ({ mtimeMs: await atomicReplace(full, raw) }));
 }
 
 function todayISO(): string {

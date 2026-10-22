@@ -10,12 +10,17 @@ import (
 
 var vaultPath string
 
+// Version is the kb release stamp. Docker builds set it with
+// -X github.com/nt-kb/kbos/internal/cli.Version=vX.Y.Z
+var Version = "dev"
+
 // Execute runs the kb CLI.
 func Execute() error {
 	root := &cobra.Command{
-		Use:   "kb",
-		Short: "KBOS — Knowledge Base Operating System",
-		Long:  "Local-first knowledge base CLI. Markdown on disk is the source of truth.",
+		Use:     "kb",
+		Short:   "KBOS — Knowledge Base Operating System",
+		Long:    "Local-first knowledge base CLI. Markdown on disk is the source of truth.",
+		Version: Version,
 	}
 	root.PersistentFlags().StringVarP(&vaultPath, "vault", "V", ".", "vault root directory")
 

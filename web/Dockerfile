@@ -1,10 +1,11 @@
 FROM golang:1.25-alpine AS kb
 WORKDIR /src
+ARG KBOS_VERSION=dev
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -o /kb ./cmd/kb
+RUN CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/nt-kb/kbos/internal/cli.Version=${KBOS_VERSION}" -o /kb ./cmd/kb
 
 FROM node:22-alpine AS deps
 WORKDIR /app
@@ -20,6 +21,12 @@ RUN npm run build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
+ARG KBOS_VERSION=dev
+ARG KBOS_COMMIT=
+ARG KBOS_BUILT_AT=
+ENV KBOS_VERSION=$KBOS_VERSION \
+    KBOS_COMMIT=$KBOS_COMMIT \
+    KBOS_BUILT_AT=$KBOS_BUILT_AT
 RUN apk add --no-cache ca-certificates
 COPY --from=kb /kb /usr/local/bin/kb
 COPY scripts /scripts
